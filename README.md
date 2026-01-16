@@ -1,3 +1,7 @@
+---
+
+## 📄 `README.md`
+
 ```markdown
 # 🔐 Bitwarden Auto — 一键部署加密容灾版
 
@@ -177,3 +181,5 @@ Copyright (c) 2025 sikiyz
 
 Permission is hereby granted...
 ```
+
+---
