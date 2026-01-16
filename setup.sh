@@ -2,7 +2,7 @@
 
 #================================================#
 #     🔐 Bitwarden 一键部署（双 CF 账号 + GPG 加密） #
-#   全平台兼容 | 自动 HTTPS | 智能清理 | 通知      #
+#   全平台兼容 | 自动 HTTPS | 智能容灾 | 多通知     #
 #================================================#
 
 set -eo pipefail
@@ -49,6 +49,12 @@ CF2_ACCOUNT_ID=""
 CF2_ACCESS_KEY=""
 CF2_SECRET_KEY=""
 CF2_BUCKET=""
+
+# ========== 脚本自身信息（请勿修改）==========
+SCRIPT_NAME="bitwarden-deploy.sh"
+SCRIPT_PATH="/usr/local/bin/$SCRIPT_NAME"
+SCRIPT_REPO_URL="https://raw.githubusercontent.com/sikiyz/bitwarden-auto/main/setup.sh"
+REMOTE_CHECK_URL="$SCRIPT_REPO_URL?$(date +%s)"  # 防缓存
 
 # ========== 检测系统 ==========
 detect_os() {
@@ -221,149 +227,19 @@ choose_mode() {
     echo "当前系统: $OS_NAME"
     echo
     echo "请选择模式："
-    echo "0) 🧽 清理模式：清除所有 Bitwarden 相关配置"
+    echo "0) 🚪 退出脚本"
     echo "1) 💾 初次部署"
     echo "2) 🔄 从 R2 恢复数据"
-    
+    echo "3) 🖱️ 立即手动执行一次加密备份"
+    echo "4) 🔁 更新脚本至最新版"
+    echo "5) 📢 测试通知功能（Telegram / 邮箱）"
+    echo "6) 🔍 查看最近备份文件"
+
     while true; do
-        read -p "选择 (0/1/2): " MODE
-        [[ "$MODE" =~ ^(0|1|2)$ ]] && break
-        warn "请输入 0、1 或 2"
+        read -p "选择 (0~6): " MODE
+        [[ "$MODE" =~ ^[0-6]$ ]] && break
+        warn "请输入 0~6"
     done
-}
-
-# ========== 新增：清理所有配置（带确认）==========
-cleanup_all() {
-    warn "此操作将删除以下所有内容："
-    echo "  • /opt/bitwarden 数据目录"
-    echo "  • Vaultwarden Docker 容器"
-    echo "  • Caddy 反向代理配置"
-    echo "  • 备份脚本与定时任务"
-    echo "  • R2 访问凭证（仅本地文件）"
-    echo "  • 安装日志"
-
-    if ! confirm "确定要继续吗？此操作不可逆！"; then
-        log "用户取消清理操作"
-        exit 1
-    fi
-
-    log "🧹 开始清理 Bitwarden 所有配置..."
-
-    # 1. 停止并删除 Docker 容器
-    if docker ps -a --format '{{.Names}}' | grep -q "^vaultwarden$"; then
-        log "⏹️ 停止 vaultwarden 容器"
-        docker stop vaultwarden >/dev/null 2>&1 || true
-        docker rm vaultwarden >/dev/null 2>&1
-    fi
-
-    # 2. 删除数据目录
-    if [[ -d "$DATA_DIR" ]]; then
-        log "🗑️ 删除数据目录: $DATA_DIR"
-        rm -rf "$DATA_DIR"
-    fi
-
-    # 3. 删除备份脚本
-    if [[ -f "/usr/local/bin/bitwarden-backup.sh" ]]; then
-        log "🗑️ 删除备份脚本"
-        rm -f /usr/local/bin/bitwarden-backup.sh
-    fi
-
-    # 4. 清除 crontab 中的相关任务
-    if crontab -l 2>/dev/null | grep -q "bitwarden"; then
-        log "⏰ 清理 crontab 定时任务"
-        crontab -l | grep -v "bitwarden" | crontab -
-    fi
-
-    # 5. 删除 s3cmd 配置文件
-    if [[ -f "$S3CMD_CONF_A" ]]; then
-        log "🔐 删除 R2 账号1配置: $S3CMD_CONF_A"
-        rm -f "$S3CMD_CONF_A"
-    fi
-    if [[ -f "$S3CMD_CONF_B" ]]; then
-        log "🔐 删除 R2 账号2配置: $S3CMD_CONF_B"
-        rm -f "$S3CMD_CONF_B"
-    fi
-
-    # 6. 删除 Caddy 配置
-    local caddy_conf="/etc/caddy/Caddyfile.d/bitwarden"
-    if [[ -f "$caddy_conf" ]]; then
-        log "🌐 删除 Caddy 配置: $caddy_conf"
-        rm -f "$caddy_conf"
-        systemctl reload caddy 2>/dev/null || true
-    fi
-
-    # 7. 删除日志文件
-    if [[ -f "$LOG_FILE" ]]; then
-        log "📝 删除安装日志: $LOG_FILE"
-        rm -f "$LOG_FILE"
-    fi
-    if [[ -f "/var/log/bitwarden-backup.log" ]]; then
-        rm -f "/var/log/bitwarden-backup.log"
-    fi
-
-    # 8. 删除临时 admin_token
-    if [[ -f "/opt/bitwarden/admin_token" ]]; then
-        rm -f "/opt/bitwarden/admin_token"
-    fi
-
-    # 9. 重载 systemd
-    systemctl daemon-reload 2>/dev/null || true
-
-    log "✅ 清理完成！系统已恢复到初始状态"
-    echo
-    echo "💡 提示：如需重新部署，请再次运行此脚本选择模式 1"
-    exit 0
-}
-
-input_config() {
-    until validate_domain "$DOMAIN"; do ask "域名 (如 vault.example.com)" DOMAIN; done
-    until validate_email "$EMAIL"; do ask "管理员邮箱 (Let's Encrypt 使用)" EMAIL; done
-
-    # ======== 新增：选择反代模式 ========
-    choose_proxy_mode
-
-    # ======== 第一个 CF 账号 ========
-    log "🔐 配置第一个 Cloudflare 账号"
-    ask "CF 账号1 Account ID" CF1_ACCOUNT_ID
-    while [[ -z "$CF1_ACCOUNT_ID" ]]; do ask "Account ID 不能为空" CF1_ACCOUNT_ID; done
-    ask "CF 账号1 Access Key" CF1_ACCESS_KEY
-    ask "CF 账号1 Secret Key" CF1_SECRET_KEY
-    ask "CF 账号1 Bucket 名称" CF1_BUCKET
-
-    # ======== 第二个 CF 账号 ========
-    log "🔐 配置第二个 Cloudflare 账号"
-    ask "CF 账号2 Account ID" CF2_ACCOUNT_ID
-    while [[ -z "$CF2_ACCOUNT_ID" ]]; do ask "Account ID 不能为空" CF2_ACCOUNT_ID; done
-    ask "CF 账号2 Access Key" CF2_ACCESS_KEY
-    ask "CF 账号2 Secret Key" CF2_SECRET_KEY
-    ask "CF 账号2 Bucket 名称" CF2_BUCKET
-
-    # ======== 加密密码 ========
-    read -sp "🔹 为备份设置加密密码（用于 GPG 加密）: " ENCRYPTION_PASSWORD
-    echo
-    while [[ -z "$ENCRYPTION_PASSWORD" ]]; do
-        warn "加密密码不能为空"
-        read -sp "🔹 请设置加密密码: " ENCRYPTION_PASSWORD
-        echo
-    done
-
-    # ======== 通知方式 ========
-    if confirm "启用 Telegram 通知？"; then
-        NOTIFY_METHOD="telegram"
-        ask "Bot Token" TELEGRAM_BOT_TOKEN
-        ask "Chat ID" TELEGRAM_CHAT_ID
-    elif confirm "启用邮件通知？"; then
-        NOTIFY_METHOD="email"
-        until validate_email "$SMTP_USER"; do ask "SMTP 用户名" SMTP_USER; done
-        read -sp "SMTP 密码" SMTP_PASS
-        echo
-        ask "SMTP 服务器 (默认 smtp.gmail.com)" input_smtp
-        SMTP_SERVER="${input_smtp:-smtp.gmail.com}"
-        ask "SMTP 端口 (默认 587)" input_port
-        SMTP_PORT="${input_port:-587}"
-    fi
-
-    confirm "确认使用以上配置？" || { error "用户取消"; exit 1; }
 }
 
 # ========== 创建 S3CMD 配置文件 ==========
@@ -692,6 +568,160 @@ EOF
     log "✅ 加密备份脚本已创建并启用"
 }
 
+# ========== 新增：手动立即备份函数 ==========
+run_manual_backup() {
+    local data_dir="$DATA_DIR/data"
+    local backup_script="/usr/local/bin/bitwarden-backup.sh"
+
+    log "🔍 检查数据目录是否存在有效数据..."
+    if [[ ! -d "$data_dir" ]]; then
+        error "数据目录不存在：$data_dir"
+        error "请先部署服务或恢复数据后再执行手动备份"
+        exit 1
+    fi
+
+    # 检查是否有非隐藏文件或关键文件
+    if ! find "$data_dir" -mindepth 1 ! -name ".*" -print -quit | grep -q "."; then
+        warn "数据目录为空或仅包含隐藏文件"
+        if ! confirm "确定要对空数据进行备份吗？"; then
+            log "用户取消空数据备份"
+            exit 1
+        fi
+    fi
+
+    if [[ ! -x "$backup_script" ]]; then
+        error "备份脚本未找到或不可执行: $backup_script"
+        error "请先以模式 1 部署服务以生成脚本"
+        exit 1
+    fi
+
+    log "🔄 开始执行手动加密备份..."
+    "$backup_script" >> /var/log/bitwarden-backup.log 2>&1
+
+    log "✅ 手动备份已完成，详情查看日志: /var/log/bitwarden-backup.log"
+    echo
+    echo "📋 最近几次本地备份:"
+    ls -lh "$BACKUP_DIR"/bitwarden-*.tar.gz.gpg 2>/dev/null | tail -n5 || echo "暂无本地加密备份"
+}
+
+# ========== 新增：更新脚本函数 ==========
+update_script() {
+    log "🔁 正在检查脚本更新..."
+
+    local tmp_file=$(mktemp)
+    if ! curl -fsSL "$SCRIPT_REPO_URL" -o "$tmp_file"; then
+        error "无法下载最新脚本，请检查网络或 URL 是否正确"
+        error "当前配置的更新地址: $SCRIPT_REPO_URL"
+        exit 1
+    fi
+
+    if ! bash -n "$tmp_file"; then
+        error "下载的脚本语法错误，可能损坏"
+        rm -f "$tmp_file"
+        exit 1
+    fi
+
+    local backup_path="${SCRIPT_PATH}.backup.$(date +%Y%m%d-%H%M%S)"
+    cp "$SCRIPT_PATH" "$backup_path"
+    mv "$tmp_file" "$SCRIPT_PATH"
+    chmod +x "$SCRIPT_PATH"
+
+    # 重新建立 bd 命令软链接
+    ln -sf "$SCRIPT_PATH" /usr/local/bin/bd >/dev/null 2>&1
+
+    log "✅ 脚本已更新！"
+    log "📁 旧版本已备份至: $backup_path"
+    log "💡 下次可通过 'bd' 快捷命令运行"
+    exit 0
+}
+
+# ========== 新增：测试通知功能 ==========
+test_notifications() {
+    log "📩 开始测试通知功能..."
+
+    local test_msg="🔔 【测试通知】\n🤖 Bitwarden 脚本运行于 $(hostname)\n📆 $(date)\n💬 这是一条测试消息。"
+
+    # Telegram 测试
+    if [[ -n "$TELEGRAM_BOT_TOKEN" && -n "$TELEGRAM_CHAT_ID" ]]; then
+        log "📨 正在发送 Telegram 测试消息..."
+        local tg_result=$(curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
+            -d chat_id="$TELEGRAM_CHAT_ID" -d text="$test_msg")
+        if echo "$tg_result" | grep -q '"ok":true'; then
+            log "✅ Telegram 通知测试成功"
+        else
+            error "❌ Telegram 通知失败: $tg_result"
+        fi
+    else
+        warn "⚠️ Telegram 未配置，跳过测试"
+    fi
+
+    # Email 测试
+    if [[ -n "$SMTP_USER" && -n "$SMTP_PASS" && -n "$SMTP_SERVER" ]]; then
+        log "📨 正在发送邮件测试消息..."
+        {
+            echo "To: $SMTP_USER"
+            echo "Subject: Bitwarden 通知测试"
+            echo ""
+            echo -e "$test_msg"
+        } | s-nail -S smtp="$SMTP_SERVER:$SMTP_PORT" -S smtp-use-starttls \
+                   -S smtp-auth=login \
+                   -S smtp-auth-user="$SMTP_USER" \
+                   -S smtp-auth-password="$SMTP_PASS" \
+                   -S ssl-verify=ignore \
+                   -v "$SMTP_USER" > /dev/null 2>&1 && \
+            log "✅ 邮件通知测试成功" || error "❌ 邮件发送失败"
+    else
+        warn "⚠️ 邮件未完整配置，跳过测试"
+    fi
+
+    log "🏁 通知测试完成"
+}
+
+# ========== 新增：查看最近备份 ==========
+view_recent_backups() {
+    echo
+    echo "🔍 最近备份文件列表"
+    echo "───────────────────────────────"
+
+    # 本地备份
+    echo "📁 本地备份 ($BACKUP_DIR):"
+    if [[ -d "$BACKUP_DIR" ]]; then
+        local local_files=("$BACKUP_DIR"/bitwarden-*.tar.gz.gpg 2>/dev/null)
+        if [[ -f "${local_files[0]}" ]]; then
+            ls -lt "$BACKUP_DIR"/bitwarden-*.tar.gz.gpg | head -n5 | awk '{print $6" "$7" "$8}'
+        else
+            echo "  （无）"
+        fi
+    else
+        echo "  ❌ 目录不存在"
+    fi
+
+    # R2 备份（需要配置）
+    if [[ -n "$CF1_ACCESS_KEY" && -n "$CF1_ACCOUNT_ID" && -n "$CF1_BUCKET" ]]; then
+        setup_s3cfg
+        echo
+        echo "☁️  R2 账号1 ($CF1_BUCKET):"
+        s3cmd --config="$S3CMD_CONF_A" ls "s3://$CF1_BUCKET/" 2>/dev/null \
+            | grep 'bitwarden-.*\.tar\.gz\.gpg' | tail -n5 | awk '{print $1" "$2" "$4}'
+        [[ $? -ne 0 ]] && echo "  ❌ 获取失败（权限或网络问题）"
+    else
+        echo
+        echo "☁️  R2 账号1: 未配置，无法查看"
+    fi
+
+    if [[ -n "$CF2_ACCESS_KEY" && -n "$CF2_ACCOUNT_ID" && -n "$CF2_BUCKET" ]]; then
+        echo
+        echo "☁️  R2 账号2 ($CF2_BUCKET):"
+        s3cmd --config="$S3CMD_CONF_B" ls "s3://$CF2_BUCKET/" 2>/dev/null \
+            | grep 'bitwarden-.*\.tar\.gz\.gpg' | tail -n5 | awk '{print $1" "$2" "$4}'
+        [[ $? -ne 0 ]] && echo "  ❌ 获取失败（权限或网络问题）"
+    else
+        echo
+        echo "☁️  R2 账号2: 未配置，无法查看"
+    fi
+    echo
+}
+
 # ========== 主流程 ==========
 main() {
     log "=== Bitwarden 加密容灾部署开始 ==="
@@ -699,46 +729,87 @@ main() {
     detect_os
     choose_mode
 
-    # ========== 新增：如果是清理模式，直接执行并退出 ==========
-    if [[ "$MODE" == "0" ]]; then
-        cleanup_all
-    fi
+    case "$MODE" in
+        0)
+            log "🚪 用户选择退出脚本"
+            echo "👋 感谢使用，再见！"
+            exit 0
+            ;;
 
-    input_config
-    install_dependencies
+        1)
+            input_config
+            install_dependencies
+            deploy_service
+            setup_caddy
+            create_backup_script
 
-    if [[ "$MODE" == "2" ]]; then
-        restore_from_r2
-    fi
+            echo
+            echo "=================================================="
+            echo "✅ 部署完成！"
+            echo "🌐 访问: https://$DOMAIN"
+            echo "🛠️  管理: https://$DOMAIN/admin"
+            [[ -f "$DATA_DIR/admin_token" ]] && echo "🔑 Token: $(cat "$DATA_DIR/admin_token")"
+            echo "📁 数据目录: $DATA_DIR/data"
+            echo "📝 日志: $LOG_FILE"
+            echo "🔐 双 R2 备份: $CF1_BUCKET (账号1), $CF2_BUCKET (账号2)"
+            echo "🔒 加密算法: GPG + AES256"
+            echo "⏰ 自动备份: 每日凌晨 2:00"
+            echo "🧼 自动清理: R2 >15天（最少保留1个），本地 >7天"
+            echo "💡 重要：加密密码已保存，恢复时需手动输入"
+            echo "=================================================="
 
-    deploy_service
-    setup_caddy
-    create_backup_script
+            MSG="🚀 Bitwarden 部署完成\n📍 $DOMAIN\n🔐 查看 Token: cat $DATA_DIR/admin_token"
+            if [[ "$NOTIFY_METHOD" == "telegram" && -n "$TELEGRAM_BOT_TOKEN" ]]; then
+                curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
+                    -d chat_id="$TELEGRAM_CHAT_ID" -d text="$MSG" > /dev/null
+            elif [[ "$NOTIFY_METHOD" == "email" && -n "$SMTP_USER" ]]; then
+                echo -e "$MSG" | s-nail -S smtp="$SMTP_SERVER:$SMTP_PORT" -S smtp-use-starttls \
+                           -S smtp-auth=login -S "smtp-auth-user=$SMTP_USER" \
+                           -S "smtp-auth-password=$SMTP_PASS" -S ssl-verify=ignore \
+                           -v "$SMTP_USER" > /dev/null
+            fi
+            ;;
 
-    echo
-    echo "=================================================="
-    echo "✅ 部署完成！"
-    echo "🌐 访问: https://$DOMAIN"
-    echo "🛠️  管理: https://$DOMAIN/admin"
-    [[ -f "$DATA_DIR/admin_token" ]] && echo "🔑 Token: $(cat "$DATA_DIR/admin_token")"
-    echo "📁 数据目录: $DATA_DIR/data"
-    echo "📝 日志: $LOG_FILE"
-    echo "🔐 双 R2 备份: $CF1_BUCKET (账号1), $CF2_BUCKET (账号2)"
-    echo "🔒 加密算法: GPG + AES256"
-    echo "⏰ 自动备份: 每日凌晨 2:00"
-    echo "🧼 自动清理: R2 >15天（最少保留1个），本地 >7天"
-    echo "💡 重要：加密密码已保存，恢复时需手动输入"
-    echo "=================================================="
+        2)
+            input_config
+            install_dependencies
+            restore_from_r2
+            deploy_service
+            setup_caddy
+            create_backup_script
+            log "✅ 恢复并部署完成"
+            ;;
 
-    MSG="🚀 Bitwarden 部署完成\n📍 $DOMAIN\n🔐 查看 Token: cat $DATA_DIR/admin_token"
-    if [[ "$NOTIFY_METHOD" == "telegram" && -n "$TELEGRAM_BOT_TOKEN" ]]; then
-        curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
-            -d chat_id="$TELEGRAM_CHAT_ID" -d text="$MSG" > /dev/null
-    elif [[ "$NOTIFY_METHOD" == "email" && -n "$SMTP_USER" ]]; then
-        echo -e "$MSG" | s-nail -S smtp="$SMTP_SERVER:$SMTP_PORT" -S smtp-use-starttls \
-                   -S smtp-auth=login -S "smtp-auth-user=$SMTP_USER" \
-                   -S "smtp-auth-password=$SMTP_PASS" -S ssl-verify=ignore \
-                   -v "$SMTP_USER" > /dev/null
+        3)
+            run_manual_backup
+            ;;
+
+        4)
+            update_script
+            ;;
+
+        5)
+            input_config
+            test_notifications
+            ;;
+
+        6)
+            input_config
+            view_recent_backups
+            ;;
+
+        *)
+            error "未知操作模式"
+            exit 1
+            ;;
+    esac
+}
+
+# ========== 设置快捷命令 bd ==========
+setup_bd_command() {
+    if ! command -v bd &> /dev/null; then
+        ln -sf "$SCRIPT_PATH" /usr/local/bin/bd >/dev/null 2>&1
+        log "⌨️ 已设置快捷命令 'bd' -> '$SCRIPT_PATH'"
     fi
 }
 
@@ -748,4 +819,12 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
+# 保存当前脚本到标准路径
+[[ -f "$SCRIPT_PATH" ]] || cp "$0" "$SCRIPT_PATH"
+chmod +x "$SCRIPT_PATH"
+
+# 设置快捷方式
+setup_bd_command
+
+# 启动主流程
 main "$@"
