@@ -1,7 +1,3 @@
----
-
-## 📄 `README.md`
-
 ```markdown
 # 🔐 Bitwarden Auto — 一键部署加密容灾版
 
