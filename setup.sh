@@ -26,6 +26,10 @@ readonly S3CMD_CONF_B="/root/.s3cfg.r2-secondary"
 readonly VALID_DOMAIN='^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$'
 readonly VALID_EMAIL='^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$'
 
+# ========== 新增：反代相关变量 ==========
+PROXY_MODE="1"
+PROXY_TARGET="127.0.0.1:8080"
+
 # ========== 变量初始化 ==========
 MODE="" DOMAIN="" EMAIL=""
 NOTIFY_METHOD="none"
@@ -87,9 +91,15 @@ install_dependencies() {
     command -v jq || pkg_install jq
     command -v gpg || pkg_install gnupg
 
-    # Nginx + Certbot
-    if ! command -v nginx &> /dev/null; then
-        pkg_install nginx certbot python3-certbot-nginx 2>/dev/null || true
+    # ========== 替换：Nginx → Caddy ==========
+    if ! command -v caddy &> /dev/null; then
+        log "📦 安装 Caddy..."
+        wget -qO- https://api.github.com/repos/caddyserver/caddy/releases/latest \
+            | grep "browser_download_url.*linux_$(uname -m | sed 's|x86_64|amd64|;s|aarch64|arm64|').deb" \
+            | head -n1 \
+            | cut -d '"' -f4 \
+            | xargs wget -O /tmp/caddy.deb
+        dpkg -i /tmp/caddy.deb && rm -f /tmp/caddy.deb
     fi
 
     # s3cmd
@@ -116,7 +126,7 @@ install_dependencies() {
         chmod +x /usr/local/bin/docker-compose
     fi
 
-    systemctl enable nginx --now 2>/dev/null || true
+    systemctl enable caddy --now 2>/dev/null || true
     log "✅ 依赖安装完成"
 }
 
@@ -134,6 +144,73 @@ confirm() {
 
 validate_domain() { [[ "$1" =~ $VALID_DOMAIN ]] && [ ${#1} -le 253 ]; }
 validate_email() { [[ "$1" =~ $VALID_EMAIL ]]; }
+
+# ========== 新增：反代模式选择 ==========
+choose_proxy_mode() {
+    echo
+    echo "请选择反向代理模式："
+    echo "1) 自动检测（推荐：优先 IPv6 → IPv4 → 127.0.0.1）"
+    echo "2) 强制使用 IPv4"
+    echo "3) 强制使用 IPv6"
+    echo "4) 使用本地回环 127.0.0.1"
+
+    while true; do
+        read -p "请输入选项 [1-4] (默认为 1): " PROXY_MODE
+        PROXY_MODE=${PROXY_MODE:-1}
+        [[ "$PROXY_MODE" =~ ^(1|2|3|4)$ ]] && break
+        warn "请输入 1~4"
+    done
+
+    case $PROXY_MODE in
+        1)
+            log "自动检测网络环境..."
+            if command -v curl &> /dev/null; then
+                IPV6=$(curl -s6 --max-time 5 https://ifconfig.co 2>/dev/null | grep ':' | head -n1 | xargs)
+            fi
+            if [[ -n "$IPV6" ]]; then
+                log "检测到公网 IPv6: $IPV6"
+                if timeout 2 bash -c "echo > /dev/tcp/[$IPV6]/8080" 2>/dev/null; then
+                    PROXY_TARGET="[$IPV6]:8080"
+                    log "使用 IPv6 反代: [$IPV6]:8080"
+                fi
+            fi
+            if [[ "$PROXY_TARGET" == "127.0.0.1:8080" ]]; then
+                IPV4=$(curl -s4 --max-time 5 https://ifconfig.co 2>/dev/null || echo "")
+                if [[ -n "$IPV4" ]]; then
+                    if timeout 2 bash -c "echo > /dev/tcp/$IPV4/8080" 2>/dev/null; then
+                        PROXY_TARGET="$IPV4:8080"
+                        log "使用 IPv4 反代: $IPV4:8080"
+                    fi
+                fi
+            fi
+            ;;
+        2)
+            log "强制使用 IPv4"
+            IPV4=$(curl -s4 --max-time 5 https://ifconfig.co 2>/dev/null || echo "127.0.0.1")
+            PROXY_TARGET="$IPV4:8080"
+            log "反代目标: $PROXY_TARGET"
+            ;;
+        3)
+            log "强制使用 IPv6"
+            if ! command -v curl &> /dev/null; then
+                error "curl 未安装"
+                exit 1
+            fi
+            IPV6=$(curl -s6 --max-time 5 https://ifconfig.co 2>/dev/null | grep ':' | head -n1 | xargs)
+            if [[ -z "$IPV6" ]]; then
+                error "无法获取公网 IPv6 地址"
+                exit 1
+            fi
+            PROXY_TARGET="[$IPV6]:8080"
+            log "反代目标: [$IPV6]:8080"
+            ;;
+        4)
+            log "使用本地回环"
+            PROXY_TARGET="127.0.0.1:8080"
+            log "反代目标: $PROXY_TARGET"
+            ;;
+    esac
+}
 
 choose_mode() {
     echo
@@ -156,6 +233,9 @@ choose_mode() {
 input_config() {
     until validate_domain "$DOMAIN"; do ask "域名 (如 vault.example.com)" DOMAIN; done
     until validate_email "$EMAIL"; do ask "管理员邮箱 (Let's Encrypt 使用)" EMAIL; done
+
+    # ======== 新增：选择反代模式 ========
+    choose_proxy_mode
 
     # ======== 第一个 CF 账号 ========
     log "🔐 配置第一个 Cloudflare 账号"
@@ -296,47 +376,58 @@ EOF
     log "✅ 服务启动完成"
 }
 
-# ========== Nginx + HTTPS ==========
-setup_nginx_ssl() {
-    local conf="/etc/nginx/conf.d/bitwarden.conf"
+# ========== 替换：Nginx → Caddy ==========
+setup_caddy() {
+    local conf="/etc/caddy/Caddyfile.d/bitwarden"
+
     cat > "$conf" << EOF
-server {
-    listen 80;
-    server_name $DOMAIN;
-    location /.well-known/acme-challenge/ { alias /var/www/certbot/; }
-    location / { return 301 https://\$host\$request_uri; }
-}
-server {
-    listen 443 ssl http2;
-    server_name $DOMAIN;
-    ssl_certificate /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/$DOMAIN/privkey.pem;
-    client_max_body_size 128M;
-    location / {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
+https://$DOMAIN {
+    reverse_proxy $PROXY_TARGET
+
+    # WebSocket 支持
+    @websocket {
+        header Connection *Upgrade*
+        header Upgrade websocket
     }
-    location /notifications/hub {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
+    reverse_proxy @websocket $PROXY_TARGET
+
+    # 安全头
+    header {
+        X-Frame-Options DENY
+        X-Content-Type-Options nosniff
+        X-XSS-Protection "1; mode=block"
+        Referrer-Policy no-referrer
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        -Server
+    }
+
+    # Let's Encrypt 验证
+    acme {
+        email $EMAIL
     }
 }
 EOF
 
-    nginx -t && systemctl reload nginx
-
-    if [[ ! -d "/etc/letsencrypt/live/$DOMAIN" ]]; then
-        mkdir -p /var/www/certbot
-        certbot certonly --webroot -w /var/www/certbot -d "$DOMAIN" --email "$EMAIL" --agree-tos -n || true
+    # 初始化主 Caddyfile
+    mkdir -p /etc/caddy/Caddyfile.d
+    if [[ ! -f /etc/caddy/Caddyfile ]] || ! grep -q "import Caddyfile.d/*" /etc/caddy/Caddyfile; then
+        cat > /etc/caddy/Caddyfile << 'EOF'
+{
+    email auto@cloudflare.com
+}
+import Caddyfile.d/*
+EOF
     fi
 
-    # 自动续期
-    (crontab -l 2>/dev/null | grep -v "certbot renew"; echo "0 3 * * * /usr/bin/certbot renew --quiet --post-hook 'systemctl reload nginx'") | crontab -
-    log "✅ HTTPS 已配置"
+    systemctl reload caddy || systemctl restart caddy
+    sleep 3
+
+    if systemctl is-active --quiet caddy; then
+        log "✅ Caddy 启动成功"
+    else
+        error "Caddy 启动失败"
+        exit 1
+    fi
 }
 
 # ========== 创建备份脚本（GPG 加密版）==========
@@ -530,7 +621,7 @@ main() {
     fi
 
     deploy_service
-    setup_nginx_ssl
+    setup_caddy
     create_backup_script
 
     echo
