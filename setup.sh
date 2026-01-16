@@ -221,13 +221,98 @@ choose_mode() {
     echo "当前系统: $OS_NAME"
     echo
     echo "请选择模式："
-    echo "1) 初次部署"
-    echo "2) 从 R2 恢复数据"
+    echo "0) 🧽 清理模式：清除所有 Bitwarden 相关配置"
+    echo "1) 💾 初次部署"
+    echo "2) 🔄 从 R2 恢复数据"
+    
     while true; do
-        read -p "选择 (1/2): " MODE
-        [[ "$MODE" =~ ^(1|2)$ ]] && break
-        warn "请输入 1 或 2"
+        read -p "选择 (0/1/2): " MODE
+        [[ "$MODE" =~ ^(0|1|2)$ ]] && break
+        warn "请输入 0、1 或 2"
     done
+}
+
+# ========== 新增：清理所有配置（带确认）==========
+cleanup_all() {
+    warn "此操作将删除以下所有内容："
+    echo "  • /opt/bitwarden 数据目录"
+    echo "  • Vaultwarden Docker 容器"
+    echo "  • Caddy 反向代理配置"
+    echo "  • 备份脚本与定时任务"
+    echo "  • R2 访问凭证（仅本地文件）"
+    echo "  • 安装日志"
+
+    if ! confirm "确定要继续吗？此操作不可逆！"; then
+        log "用户取消清理操作"
+        exit 1
+    fi
+
+    log "🧹 开始清理 Bitwarden 所有配置..."
+
+    # 1. 停止并删除 Docker 容器
+    if docker ps -a --format '{{.Names}}' | grep -q "^vaultwarden$"; then
+        log "⏹️ 停止 vaultwarden 容器"
+        docker stop vaultwarden >/dev/null 2>&1 || true
+        docker rm vaultwarden >/dev/null 2>&1
+    fi
+
+    # 2. 删除数据目录
+    if [[ -d "$DATA_DIR" ]]; then
+        log "🗑️ 删除数据目录: $DATA_DIR"
+        rm -rf "$DATA_DIR"
+    fi
+
+    # 3. 删除备份脚本
+    if [[ -f "/usr/local/bin/bitwarden-backup.sh" ]]; then
+        log "🗑️ 删除备份脚本"
+        rm -f /usr/local/bin/bitwarden-backup.sh
+    fi
+
+    # 4. 清除 crontab 中的相关任务
+    if crontab -l 2>/dev/null | grep -q "bitwarden"; then
+        log "⏰ 清理 crontab 定时任务"
+        crontab -l | grep -v "bitwarden" | crontab -
+    fi
+
+    # 5. 删除 s3cmd 配置文件
+    if [[ -f "$S3CMD_CONF_A" ]]; then
+        log "🔐 删除 R2 账号1配置: $S3CMD_CONF_A"
+        rm -f "$S3CMD_CONF_A"
+    fi
+    if [[ -f "$S3CMD_CONF_B" ]]; then
+        log "🔐 删除 R2 账号2配置: $S3CMD_CONF_B"
+        rm -f "$S3CMD_CONF_B"
+    fi
+
+    # 6. 删除 Caddy 配置
+    local caddy_conf="/etc/caddy/Caddyfile.d/bitwarden"
+    if [[ -f "$caddy_conf" ]]; then
+        log "🌐 删除 Caddy 配置: $caddy_conf"
+        rm -f "$caddy_conf"
+        systemctl reload caddy 2>/dev/null || true
+    fi
+
+    # 7. 删除日志文件
+    if [[ -f "$LOG_FILE" ]]; then
+        log "📝 删除安装日志: $LOG_FILE"
+        rm -f "$LOG_FILE"
+    fi
+    if [[ -f "/var/log/bitwarden-backup.log" ]]; then
+        rm -f "/var/log/bitwarden-backup.log"
+    fi
+
+    # 8. 删除临时 admin_token
+    if [[ -f "/opt/bitwarden/admin_token" ]]; then
+        rm -f "/opt/bitwarden/admin_token"
+    fi
+
+    # 9. 重载 systemd
+    systemctl daemon-reload 2>/dev/null || true
+
+    log "✅ 清理完成！系统已恢复到初始状态"
+    echo
+    echo "💡 提示：如需重新部署，请再次运行此脚本选择模式 1"
+    exit 0
 }
 
 input_config() {
@@ -613,6 +698,12 @@ main() {
 
     detect_os
     choose_mode
+
+    # ========== 新增：如果是清理模式，直接执行并退出 ==========
+    if [[ "$MODE" == "0" ]]; then
+        cleanup_all
+    fi
+
     input_config
     install_dependencies
 
