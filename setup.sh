@@ -484,6 +484,7 @@ EOF
 }
 
 # ========== 创建备份脚本（GPG 加密版）==========
+# 注意：使用 << 'BACKUP_EOF' 防止变量提前展开，确保占位符能被后续 sed 正确替换
 create_backup_script() {
     local script="/usr/local/bin/bitwarden-backup.sh"
     cat > "$script" << 'BACKUP_EOF'
