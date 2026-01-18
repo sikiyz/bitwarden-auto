@@ -218,6 +218,92 @@ choose_proxy_mode() {
     esac
 }
 
+# ========== 新增：输入配置函数 ==========
+input_config() {
+    echo
+    log "📝 开始配置 Bitwarden 部署参数"
+
+    # 输入域名
+    ask "请输入您的域名（例如：vault.example.com）" DOMAIN
+    while ! validate_domain "$DOMAIN"; do
+        warn "域名格式不合法，请重新输入"
+        ask "请输入有效的域名" DOMAIN
+    done
+
+    # 输入邮箱（用于 Let's Encrypt）
+    ask "请输入管理员邮箱（用于 HTTPS 证书）" EMAIL
+    while ! validate_email "$EMAIL"; do
+        warn "邮箱格式不合法，请重新输入"
+        ask "请输入有效的邮箱" EMAIL
+    done
+
+    # 加密密码（必须）
+    read -sp "🔐 请输入备份加密密码（GPG 使用，不会明文保存）: " ENCRYPTION_PASSWORD
+    echo
+    while [[ -z "$ENCRYPTION_PASSWORD" ]]; do
+        warn "加密密码不能为空"
+        read -sp "请再次输入加密密码: " ENCRYPTION_PASSWORD
+        echo
+    done
+
+    # 通知方式
+    echo
+    echo "请选择通知方式："
+    echo "1) Telegram"
+    echo "2) Email"
+    echo "3) 不启用通知"
+    while true; do
+        read -p "选择 (1-3): " NOTIFY_CHOICE
+        case "$NOTIFY_CHOICE" in
+            1)
+                ask "Telegram Bot Token" TELEGRAM_BOT_TOKEN
+                ask "Telegram Chat ID" TELEGRAM_CHAT_ID
+                NOTIFY_METHOD="telegram"
+                break
+                ;;
+            2)
+                ask "SMTP 邮箱地址" SMTP_USER
+                read -sp "SMTP 密码: " SMTP_PASS
+                echo
+                ask "SMTP 服务器（如 smtp.gmail.com）" SMTP_SERVER
+                ask "SMTP 端口（默认 587）" input_port
+                SMTP_PORT="${input_port:-587}"
+                NOTIFY_METHOD="email"
+                break
+                ;;
+            3)
+                NOTIFY_METHOD="none"
+                log "已禁用通知功能"
+                break
+                ;;
+            *)
+                warn "请输入 1、2 或 3"
+                ;;
+        esac
+    done
+
+    # 第一个 CF R2 账号
+    echo
+    log "☁️  配置第一个 Cloudflare R2 存储账号"
+    ask "CF 账号 Account ID" CF1_ACCOUNT_ID
+    ask "R2 Access Key" CF1_ACCESS_KEY
+    ask "R2 Secret Key" CF1_SECRET_KEY
+    ask "R2 Bucket 名称" CF1_BUCKET
+
+    # 第二个 CF R2 账号
+    echo
+    log "☁️  配置第二个 Cloudflare R2 存储账号（容灾备份）"
+    ask "CF 账号 Account ID" CF2_ACCOUNT_ID
+    ask "R2 Access Key" CF2_ACCESS_KEY
+    ask "R2 Secret Key" CF2_SECRET_KEY
+    ask "R2 Bucket 名称" CF2_BUCKET
+
+    # 反向代理模式
+    choose_proxy_mode
+
+    log "✅ 所有配置项已输入完成"
+}
+
 choose_mode() {
     echo
     echo "========================================"
