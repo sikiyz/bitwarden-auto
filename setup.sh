@@ -330,24 +330,30 @@ choose_mode() {
 
 # ========== 创建 S3CMD 配置文件 ==========
 setup_s3cfg() {
-    cat > "$S3CMD_CONF_A" << EOF
+    cat > "$S3CMD_CONF_A" << 'EOF'
 [default]
-access_key = $CF1_ACCESS_KEY
-secret_key = $CF1_SECRET_KEY
-host_base = ${CF1_ACCOUNT_ID}.r2.cloudflarestorage.com
+access_key = __CF1_ACCESS_KEY__
+secret_key = __CF1_SECRET_KEY__
+host_base = __CF1_ACCOUNT_ID__.r2.cloudflarestorage.com
 use_https = True
 signature_v2 = False
 EOF
+    sed -i "s|__CF1_ACCESS_KEY__|$CF1_ACCESS_KEY|g" "$S3CMD_CONF_A"
+    sed -i "s|__CF1_SECRET_KEY__|$CF1_SECRET_KEY|g" "$S3CMD_CONF_A"
+    sed -i "s|__CF1_ACCOUNT_ID__|$CF1_ACCOUNT_ID|g" "$S3CMD_CONF_A"
     chmod 600 "$S3CMD_CONF_A"
 
-    cat > "$S3CMD_CONF_B" << EOF
+    cat > "$S3CMD_CONF_B" << 'EOF'
 [default]
-access_key = $CF2_ACCESS_KEY
-secret_key = $CF2_SECRET_KEY
-host_base = ${CF2_ACCOUNT_ID}.r2.cloudflarestorage.com
+access_key = __CF2_ACCESS_KEY__
+secret_key = __CF2_SECRET_KEY__
+host_base = __CF2_ACCOUNT_ID__.r2.cloudflarestorage.com
 use_https = True
 signature_v2 = False
 EOF
+    sed -i "s|__CF2_ACCESS_KEY__|$CF2_ACCESS_KEY|g" "$S3CMD_CONF_B"
+    sed -i "s|__CF2_SECRET_KEY__|$CF2_SECRET_KEY|g" "$S3CMD_CONF_B"
+    sed -i "s|__CF2_ACCOUNT_ID__|$CF2_ACCOUNT_ID|g" "$S3CMD_CONF_B"
     chmod 600 "$S3CMD_CONF_B"
 
     log "✅ 已生成两个 R2 配置文件"
@@ -480,7 +486,7 @@ EOF
 # ========== 创建备份脚本（GPG 加密版）==========
 create_backup_script() {
     local script="/usr/local/bin/bitwarden-backup.sh"
-    cat > "$script" << 'EOF'
+    cat > "$script" << 'BACKUP_EOF'
 #!/bin/bash
 
 SOURCE="/opt/bitwarden/data"
@@ -488,10 +494,9 @@ BACKUP_DIR="/opt/bitwarden/backups"
 TIMESTAMP=$(date +"%Y%m%d-%H%M%S")
 RAW_FILE="$BACKUP_DIR/bitwarden-$TIMESTAMP.tar.gz"
 ENC_FILE="$RAW_FILE.gpg"
-TEMP_LIST=$(mktemp)
 
-log() { echo "[INFO] $(date '+%F %T') $1"; }
-error() { echo "[ERROR] $(date '+%F %T') $1"; }
+log() { echo "[INFO] $(date '+%F %T') \$1"; }
+error() { echo "[ERROR] $(date '+%F %T') \$1"; }
 
 # ======== 注入配置变量 ========
 ENCRYPTION_PASSWORD="__ENCRYPTION_PASSWORD__"
@@ -516,117 +521,117 @@ CONF2="/tmp/.s3cfg.cf2"
 
 # ======== 打包数据 ========
 log "📦 开始打包 Bitwarden 数据..."
-mkdir -p "$BACKUP_DIR"
-tar -czf "$RAW_FILE" -C "$SOURCE" . || { error "打包失败"; exit 1; }
-log "✅ 数据已打包: $RAW_FILE"
+mkdir -p "\$BACKUP_DIR"
+tar -czf "\$RAW_FILE" -C "\$SOURCE" . || { error "打包失败"; exit 1; }
+log "✅ 数据已打包: \$RAW_FILE"
 
 # ======== GPG 加密 ========
 log "🔐 正在使用 GPG AES256 加密..."
-echo "$ENCRYPTION_PASSWORD" | gpg --batch --yes --cipher-algo AES256 -c --passphrase-fd 0 "$RAW_FILE" || { error "加密失败"; exit 1; }
-rm -f "$RAW_FILE"
-log "✅ 已加密: $ENC_FILE"
+echo "\$ENCRYPTION_PASSWORD" | gpg --batch --yes --cipher-algo AES256 -c --passphrase-fd 0 "\$RAW_FILE" || { error "加密失败"; exit 1; }
+rm -f "\$RAW_FILE"
+log "✅ 已加密: \$ENC_FILE"
 
 # ======== 写入 s3cmd 配置 ========
-cat > "$CONF1" << EOL
+cat > "\$CONF1" << EOL
 [default]
-access_key = $CF1_KEY
-secret_key = $CF1_SEC
-host_base = ${CF1_ID}.r2.cloudflarestorage.com
+access_key = \$CF1_KEY
+secret_key = \$CF1_SEC
+host_base = \${CF1_ID}.r2.cloudflarestorage.com
 use_https = True
 signature_v2 = False
 EOL
-chmod 600 "$CONF1"
+chmod 600 "\$CONF1"
 
-cat > "$CONF2" << EOL
+cat > "\$CONF2" << EOL
 [default]
-access_key = $CF2_KEY
-secret_key = $CF2_SEC
-host_base = ${CF2_ID}.r2.cloudflarestorage.com
+access_key = \$CF2_KEY
+secret_key = \$CF2_SEC
+host_base = \${CF2_ID}.r2.cloudflarestorage.com
 use_https = True
 signature_v2 = False
 EOL
-chmod 600 "$CONF2"
+chmod 600 "\$CONF2"
 
 # ======== 上传到两个 R2 账号 ========
 log "📤 正在上传加密备份到两个 R2 账号..."
-s3cmd --config="$CONF1" put "$ENC_FILE" "s3://$CF1_BKT/" && log "✅ 已上传至 CF1: $CF1_BKT"
-s3cmd --config="$CONF2" put "$ENC_FILE" "s3://$CF2_BKT/" && log "✅ 已上传至 CF2: $CF2_BKT"
+s3cmd --config="\$CONF1" put "\$ENC_FILE" "s3://\$CF1_BKT/" && log "✅ 已上传至 CF1: \$CF1_BKT"
+s3cmd --config="\$CONF2" put "\$ENC_FILE" "s3://\$CF2_BKT/" && log "✅ 已上传至 CF2: \$CF2_BKT"
 
 # ======== 清理 R2 上过期的加密备份（>15天，最少保留1个）========
 clean_r2_old_backups() {
-    local config="$1"
-    local bucket="$2"
+    local config="\$1"
+    local bucket="\$2"
     local cutoff_days=15
-    local now=$(date +%s)
-    local list_file=$(mktemp)
+    local now=\$(date +%s)
+    local list_file=\$(mktemp)
 
-    log "🧹 扫描 $bucket 中的加密备份文件..."
-    s3cmd --config="$config" ls "s3://$bucket/" | grep 'bitwarden-.*\.tar\.gz\.gpg' > "$list_file"
+    log "🧹 扫描 \$bucket 中的加密备份文件..."
+    s3cmd --config="\$config" ls "s3://\$bucket/" | grep 'bitwarden-.*\.tar\.gz\.gpg' > "\$list_file"
 
-    local total_count=$(wc -l < "$list_file")
-    if [ $total_count -eq 0 ]; then
-        log "✅ $bucket 中无相关备份文件"
-        rm -f "$list_file"
+    local total_count=\$(wc -l < "\$list_file")
+    if [ \$total_count -eq 0 ]; then
+        log "✅ \$bucket 中无相关备份文件"
+        rm -f "\$list_file"
         return
     fi
 
-    if [ $total_count -le 1 ]; then
-        log "⚠️ 仅 $total_count 个备份，启用保护：不删除任何文件"
-        rm -f "$list_file"
+    if [ \$total_count -le 1 ]; then
+        log "⚠️ 仅 \$total_count 个备份，启用保护：不删除任何文件"
+        rm -f "\$list_file"
         return
     fi
 
-    log "📊 发现 $total_count 个备份，开始检查 >$cutoff_days 天的文件..."
+    log "📊 发现 \$total_count 个备份，开始检查 >\$cutoff_days 天的文件..."
     while read -r line; do
-        file_date_str="$(echo "$line" | awk '{print $1, $2}')"
-        file_url="$(echo "$line" | awk '{print $4}')"
-        [ -z "$file_date_str" ] || [ -z "$file_url" ] && continue
+        file_date_str="\$(echo "\$line" | awk '{print \$1, \$2}')"
+        file_url="\$(echo "\$line" | awk '{print \$4}')"
+        [ -z "\$file_date_str" ] || [ -z "\$file_url" ] && continue
 
-        file_ts=$(date -d "$file_date_str" +%s 2>/dev/null) || continue
+        file_ts=\$(date -d "\$file_date_str" +%s 2>/dev/null) || continue
         days_old=$(( (now - file_ts) / 86400 ))
 
-        if [ $days_old -gt $cutoff_days ]; then
-            log "🗑️ 过期文件 ($days_old 天): $file_url"
-            s3cmd --config="$config" del "$file_url" > /dev/null && log "✔️ 已删除 $file_url"
+        if [ \$days_old -gt \$cutoff_days ]; then
+            log "🗑️ 过期文件 (\$days_old 天): \$file_url"
+            s3cmd --config="\$config" del "\$file_url" > /dev/null && log "✔️ 已删除 \$file_url"
         else
-            log "📌 保留文件 ($days_old 天): $file_url"
+            log "📌 保留文件 (\$days_old 天): \$file_url"
         fi
-    done < "$list_file"
-    rm -f "$list_file"
+    done < "\$list_file"
+    rm -f "\$list_file"
 }
 
-clean_r2_old_backups "$CONF1" "$CF1_BKT"
-clean_r2_old_backups "$CONF2" "$CF2_BKT"
+clean_r2_old_backups "\$CONF1" "\$CF1_BKT"
+clean_r2_old_backups "\$CONF2" "\$CF2_BKT"
 
 # ======== 清理本地旧加密备份（保留7天） ========
-find "$BACKUP_DIR" -name "bitwarden-*.tar.gz.gpg" -mtime +7 -delete
+find "\$BACKUP_DIR" -name "bitwarden-*.tar.gz.gpg" -mtime +7 -delete
 log "🧹 本地旧备份已清理（保留7天内）"
 
 # ======== 发送通知 ========
-FILENAME=$(basename "$ENC_FILE")
-MSG="🔐 加密备份成功\n📅 $(date)\n📄 $FILENAME\n📍 CF1: $CF1_BKT\n📍 CF2: $CF2_BKT\n💡 使用 AES256-GPG 加密"
+FILENAME=\$(basename "\$ENC_FILE")
+MSG="🔐 加密备份成功\\n📅 \$(date)\\n📄 \$FILENAME\\n📍 CF1: \$CF1_BKT\\n📍 CF2: \$CF2_BKT\\n💡 使用 AES256-GPG 加密"
 
-if [[ "$NOTIFY_METHOD" == "telegram" && -n "$TG_TOKEN" ]]; then
-    curl -s -X POST "https://api.telegram.org/bot$TG_TOKEN/sendMessage" \
-        -d chat_id="$TG_CHAT" -d text="$MSG" > /dev/null
+if [[ "\$NOTIFY_METHOD" == "telegram" && -n "\$TG_TOKEN" ]]; then
+    curl -s -X POST "https://api.telegram.org/bot\$TG_TOKEN/sendMessage" \
+        -d chat_id="\$TG_CHAT" -d text="\$MSG" > /dev/null
     log "📲 Telegram 通知已发送"
-elif [[ "$NOTIFY_METHOD" == "email" && -n "$SMTP_USER" ]]; then
+elif [[ "\$NOTIFY_METHOD" == "email" && -n "\$SMTP_USER" ]]; then
     {
-        echo "To: $SMTP_USER"
+        echo "To: \$SMTP_USER"
         echo "Subject: Bitwarden 加密备份完成"
         echo ""
-        echo -e "$MSG"
-    } | s-nail -S smtp="$SMTP_HOST:$SMTP_PORT" -S smtp-use-starttls \
+        echo -e "\$MSG"
+    } | s-nail -S smtp="\$SMTP_HOST:\$SMTP_PORT" -S smtp-use-starttls \
                -S smtp-auth=login \
-               -S smtp-auth-user="$SMTP_USER" \
-               -S smtp-auth-password="$SMTP_PASS" \
+               -S smtp-auth-user="\$SMTP_USER" \
+               -S smtp-auth-password="\$SMTP_PASS" \
                -S ssl-verify=ignore \
-               -v "$SMTP_USER" > /dev/null
+               -v "\$SMTP_USER" > /dev/null
     log "📧 邮件通知已发送"
 fi
 
 log "🎉 全部完成"
-EOF
+BACKUP_EOF
 
     # 替换占位符
     sed -i "s|__ENCRYPTION_PASSWORD__|$ENCRYPTION_PASSWORD|g" "$script"
