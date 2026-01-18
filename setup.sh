@@ -175,17 +175,25 @@ choose_proxy_mode() {
             fi
             if [[ -n "$IPV6" ]]; then
                 log "检测到公网 IPv6: $IPV6"
-                if timeout 2 bash -c "echo > /dev/tcp/[$IPV6]/8080" 2>/dev/null; then
+                # 检查本地是否有 IPv6 地址（而不是检查远程端口）
+                if ip -6 addr show | grep -q "$IPV6"; then
                     PROXY_TARGET="[$IPV6]:8080"
                     log "使用 IPv6 反代: [$IPV6]:8080"
+                else
+                    log "IPv6 地址不在本地接口上，跳过"
                 fi
             fi
+            
+            # 如果 IPv6 不可用，尝试 IPv4
             if [[ "$PROXY_TARGET" == "127.0.0.1:8080" ]]; then
                 IPV4=$(curl -s4 --max-time 5 https://ifconfig.co 2>/dev/null || echo "")
                 if [[ -n "$IPV4" ]]; then
-                    if timeout 2 bash -c "echo > /dev/tcp/$IPV4/8080" 2>/dev/null; then
+                    # 检查本地是否有 IPv4 地址
+                    if ip -4 addr show | grep -q "$IPV4"; then
                         PROXY_TARGET="$IPV4:8080"
                         log "使用 IPv4 反代: $IPV4:8080"
+                    else
+                        log "IPv4 地址不在本地接口上，使用回环地址"
                     fi
                 fi
             fi
