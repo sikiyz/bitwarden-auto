@@ -10,9 +10,10 @@ IFS=$'\n\t'
 echo "🚀 欢迎使用 NodeSeek 自动签到一键安装脚本"
 echo "--------------------------------------------------"
 
-# 获取当前用户家目录（兼容 sudo）
-if [ "$HOME" = "/root" ] && [ -n "${SUDO_USER}" ]; then
-    USER_HOME=$(eval echo ~${SUDO_USER})
+if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ] && [ -d "/home/${SUDO_USER}" ]; then
+    USER_HOME="/home/${SUDO_USER}"
+elif [ "$(id -u)" -eq 0 ]; then
+    USER_HOME="/root"
 else
     USER_HOME="$HOME"
 fi
