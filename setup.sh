@@ -1,500 +1,904 @@
 #!/bin/bash
-# ========================================================
-# Bitwarden + Caddy + R2 Encrypted Backup Auto Installer
-# Author: Assistant (Qwen)
-# Features:
-#   - Install or Restore Bitwarden RS with Caddy reverse proxy
-#   - Auto detect IPv4/v6 for domain binding
-#   - Daily encrypted backup to two Cloudflare R2 buckets
-#   - Email or Telegram notifications
-#   - Test notification & cleanup options
-# ========================================================
 
-set -euo pipefail
+# Bitwarden自托管一键部署与恢复脚本
+# 支持IPv4/IPv6反代、自动备份到Cloudflare R2、通知功能
 
+set -e
+
+# 颜色定义
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-NC='\033[0m'
+NC='\033[0m' # No Color
 
-CONFIG_FILE="/opt/bitwarden/bw-auto.conf"
+# 配置文件路径
+CONFIG_FILE="/opt/bitwarden/config.sh"
 BACKUP_DIR="/opt/bitwarden/backups"
-SCRIPT_DIR="/opt/bitwarden/scripts"
-LOG_FILE="/var/log/bitwarden-auto.log"
-CRON_JOB="0 2 * * * /bin/bash $SCRIPT_DIR/backup.sh >> $LOG_FILE 2>&1"
+DATA_DIR="/opt/bitwarden/data"
+LOG_FILE="/var/log/bitwarden_setup.log"
 
 # 日志函数
 log() {
-    echo -e "$(date '+%Y-%m-%d %H:%M:%S') | $1" | tee -a "$LOG_FILE"
+    echo -e "${BLUE}[$(date '+%Y-%m-%d %H:%M:%S')]${NC} $1" | tee -a "$LOG_FILE"
 }
 
-error_exit() {
-    log "${RED}ERROR: $1${NC}"
+error() {
+    echo -e "${RED}[ERROR]${NC} $1" | tee -a "$LOG_FILE"
     exit 1
 }
 
-# ============== 菜单选择 ==============
-show_menu() {
-    echo
-    echo "=========================================="
-    echo "   Bitwarden 一键部署与恢复脚本"
-    echo "=========================================="
-    echo "1) 初次搭建（Install from scratch）"
-    echo "2) 恢复搭建（Restore from backup）"
-    echo "3) 发送测试通知（Test Notification）"
-    echo "4) 删除所有部署内容（Clean Up）"
-    echo "5) 退出"
-    echo "=========================================="
+success() {
+    echo -e "${GREEN}[SUCCESS]${NC} $1" | tee -a "$LOG_FILE"
 }
 
-# ============== 配置收集 ==============
-load_or_ask_config() {
-    declare -A config_keys=(
-        ["DOMAIN"]="主域名（例如：vault.example.com）"
-        ["EMAIL"]="管理员邮箱（用于 Let's Encrypt）"
-        ["TZ"]="时区（如 Asia/Shanghai）"
-        ["R2_ENDPOINT"]="R2 终端节点（默认：https://\${BUCKET}.\${ACCOUNT}.r2.cloudflarestorage.com）"
-        ["R2_ACCOUNT_ID"]="Cloudflare Account ID"
-        ["R2_ACCESS_KEY_ID"]="R2 Access Key ID"
-        ["R2_SECRET_ACCESS_KEY"]="R2 Secret Access Key"
-        ["R2_BUCKET_1"]="第一个 R2 存储桶名称"
-        ["R2_BUCKET_2"]="第二个 R2 存储桶名称"
-        ["NOTIFY_METHOD"]="通知方式（telegram/email）"
-        ["TELEGRAM_BOT_TOKEN"]="Telegram Bot Token（如果选择 telegram）"
-        ["TELEGRAM_CHAT_ID"]="Telegram Chat ID（如果选择 telegram）"
-        ["SMTP_HOST"]="SMTP 主机（如 smtp.gmail.com）"
-        ["SMTP_PORT"]="SMTP 端口（如 587）"
-        ["SMTP_USER"]="SMTP 用户名（邮箱地址）"
-        ["SMTP_PASS"]="SMTP 密码或 App Password"
-        ["ENCRYPTION_PASSWORD"]="备份加密密码（建议强密码）"
-    )
+warning() {
+    echo -e "${YELLOW}[WARNING]${NC} $1" | tee -a "$LOG_FILE"
+}
 
+# 检查root权限
+check_root() {
+    if [[ $EUID -ne 0 ]]; then
+        error "请使用root权限运行此脚本"
+    fi
+}
+
+# 检查系统
+check_system() {
+    if [[ -f /etc/os-release ]]; then
+        . /etc/os-release
+        OS=$NAME
+        VER=$VERSION_ID
+    else
+        error "无法检测操作系统"
+    fi
+    
+    log "检测到系统: $OS $VER"
+    
+    # 检查架构
+    ARCH=$(uname -m)
+    if [[ "$ARCH" != "x86_64" && "$ARCH" != "aarch64" ]]; then
+        error "不支持的架构: $ARCH"
+    fi
+}
+
+# 安装依赖
+install_dependencies() {
+    log "安装系统依赖..."
+    
+    if [[ "$OS" == *"Ubuntu"* ]] || [[ "$OS" == *"Debian"* ]]; then
+        apt-get update
+        apt-get install -y curl wget git docker.io docker-compose jq sqlite3 openssl cron certbot python3-certbot-dns-cloudflare
+        systemctl enable docker
+        systemctl start docker
+    elif [[ "$OS" == *"CentOS"* ]] || [[ "$OS" == *"Rocky"* ]] || [[ "$OS" == *"AlmaLinux"* ]]; then
+        yum install -y curl wget git docker docker-compose jq sqlite3 openssl cronie certbot python3-certbot-dns-cloudflare
+        systemctl enable docker
+        systemctl start docker
+    else
+        error "不支持的操作系统: $OS"
+    fi
+    
+    # 安装acme.sh用于SSL证书
+    curl https://get.acme.sh | sh
+    
+    success "依赖安装完成"
+}
+
+# 加载配置
+load_config() {
     if [[ -f "$CONFIG_FILE" ]]; then
         source "$CONFIG_FILE"
-        log "${GREEN}已加载现有配置文件。${NC}"
-        read -p "是否重新配置？(y/N): " -n1 -r
-        echo
-        [[ ! $REPLY =~ ^[Yy]$ ]] && return 0
-    fi
-
-    : > "$CONFIG_FILE"
-    for key in "${!config_keys[@]}"; do
-        local prompt="${config_keys[$key]}"
-        while true; do
-            read -p "$prompt: " input
-            if [[ -z "$input" ]]; then
-                if [[ "$key" == "TELEGRAM_BOT_TOKEN" || "$key" == "TELEGRAM_CHAT_ID" ]] && [[ "${NOTIFY_METHOD:-}" != "telegram" ]]; then
-                    break
-                elif [[ "$key" == "SMTP_"* ]] && [[ "${NOTIFY_METHOD:-}" != "email" ]]; then
-                    break
-                else
-                    echo -e "${YELLOW}此项不能为空${NC}"
-                fi
-            else
-                declare "$key=$input"
-                echo "$key='$input'" >> "$CONFIG_FILE"
-                break
-            fi
-        done
-    done
-
-    # 特殊处理 DOMAIN 协议
-    if [[ "$DOMAIN" != http* ]]; then
-        DOMAIN="https://$DOMAIN"
-    fi
-    echo "DOMAIN='$DOMAIN'" >> "$CONFIG_FILE"
-
-    log "${GREEN}配置已保存至 $CONFIG_FILE${NC}"
-}
-
-# ============== 依赖检查与安装 ==============
-install_dependencies() {
-    log "正在安装必要依赖..."
-    apt-get update
-    apt-get install -y \
-        docker.io \
-        docker-compose \
-        curl \
-        wget \
-        gnupg \
-        ca-certificates \
-        jq \
-        rclone \
-        haveged \
-        ssmtp \
-        mailutils \
-        || error_exit "依赖安装失败"
-
-    # 启用 Docker
-    systemctl enable docker --now || true
-}
-
-# ============== 检查是否已安装 bitwarden ==============
-is_bitwarden_installed() {
-    [[ -d "/opt/bitwarden" ]] && [[ -f "/opt/bitwarden/docker-compose.yml" ]]
-}
-
-# ============== 获取公网 IP（优先 IPv6） ==============
-get_preferred_ip() {
-    local ipv6=$(curl -s6 --max-time 5 https://ifconfig.co)
-    local ipv4=$(curl -s4 --max-time 5 https://ifconfig.co)
-
-    if [[ -n "$ipv6" ]] && [[ "$ipv6" != *"timeout"* ]]; then
-        echo "$ipv6"
-        export USE_IPV6=true
-    elif [[ -n "$ipv4" ]]; then
-        echo "$ipv4"
-        export USE_IPV6=false
     else
-        error_exit "无法获取公网 IP"
+        # 默认配置
+        DOMAIN=""
+        EMAIL=""
+        IP_VERSION="ipv4"
+        NOTIFICATION_TYPE="none"
+        TELEGRAM_BOT_TOKEN=""
+        TELEGRAM_CHAT_ID=""
+        EMAIL_TO=""
+        CF_ACCOUNT_ID_1=""
+        CF_R2_ACCESS_KEY_1=""
+        CF_R2_SECRET_KEY_1=""
+        CF_R2_BUCKET_1=""
+        CF_ACCOUNT_ID_2=""
+        CF_R2_ACCESS_KEY_2=""
+        CF_R2_SECRET_KEY_2=""
+        CF_R2_BUCKET_2=""
+        BACKUP_ENCRYPTION_KEY=""
+        ENABLE_AUTO_BACKUP="true"
     fi
 }
 
-# ============== Caddy 安装与配置 ==============
-setup_caddy() {
-    local domain=${DOMAIN#https://}
-    local ip=$(get_preferred_ip)
-    log "使用 IP: $ip (${USE_IPV6:+IPv6} ${USE_IPV6:-IPv4}) 绑定域名 $domain"
-
-    # 写入 Caddyfile
-    cat > /etc/caddy/Caddyfile << EOF
-$domain {
-    reverse_proxy http://127.0.0.1:8080
-    tls $EMAIL
-}
-EOF
-
-    # 安装 Caddy
-    if ! command -v caddy &> /dev/null; then
-        curl -1sLf 'https://dl.caddyserver.com/install.sh' | bash
-    fi
-
-    # 启动 Caddy
-    systemctl enable caddy --now || error_exit "Caddy 启动失败"
-    sleep 5
-}
-
-# ============== 初始化 Bitwarden ==============
-setup_bitwarden() {
-    local bw_dir="/opt/bitwarden"
-    mkdir -p "$bw_dir"
-    cd "$bw_dir"
-
-    if [[ ! -f "docker-compose.yml" ]]; then
-        curl -O https://raw.githubusercontent.com/dani-garcia/bitwarden_rs/master/docker-compose.yml
-    fi
-
-    # 修改端口为 8080 避免冲突
-    sed -i 's/80:80/8080:80/g' docker-compose.yml
-
-    # 创建 env 文件（可根据需要扩展）
-    cat > .env << EOF
-SIGNUPS_ALLOWED=true
-ADMIN_TOKEN=$(openssl rand -base64 32)
-WEBSOCKET_ENABLED=true
-EOF
-
-    # 启动容器
-    docker-compose up -d
-    sleep 10
-
-    if ! docker-compose ps | grep -q "Up"; then
-        error_exit "Bitwarden 容器启动失败"
-    fi
-
-    log "${GREEN}Bitwarden 已成功启动！访问 $DOMAIN${NC}"
-}
-
-# ============== Rclone 配置 R2 ==============
-setup_rclone() {
-    local name1="r2-$R2_BUCKET_1"
-    local name2="r2-$R2_BUCKET_2"
-
-    # 自动生成 rclone 配置
-    cat > ~/.config/rclone/rclone.conf << EOF
-[$name1]
-type = s3
-provider = Cloudflare
-access_key_id = $R2_ACCESS_KEY_ID
-secret_access_key = $R2_SECRET_ACCESS_KEY
-endpoint = https://$R2_ACCOUNT_ID.r2.cloudflarestorage.com
-region = auto
-
-[$name2]
-type = s3
-provider = Cloudflare
-access_key_id = $R2_ACCESS_KEY_ID
-secret_access_key = $R2_SECRET_ACCESS_KEY
-endpoint = https://$R2_ACCOUNT_ID.r2.cloudflarestorage.com
-region = auto
-EOF
-
-    log "Rclone 已配置完毕"
-}
-
-# ============== 创建备份脚本 ==============
-create_backup_script() {
-    mkdir -p "$SCRIPT_DIR"
-    cat > "$SCRIPT_DIR/backup.sh" << 'EOF'
+# 保存配置
+save_config() {
+    cat > "$CONFIG_FILE" << EOF
 #!/bin/bash
-set -euo pipefail
-
-source '/opt/bitwarden/bw-auto.conf'
-export PASSPHRASE="$ENCRYPTION_PASSWORD"
-
-DATE=$(date '+%Y%m%d-%H%M%S')
-BACKUP_NAME="bitwarden-backup-$DATE.tar.gz"
-ENCRYPTED_NAME="$BACKUP_NAME.gpg"
-RAW_PATH="$BACKUP_DIR/$BACKUP_NAME"
-ENC_PATH="$BACKUP_DIR/$ENCRYPTED_NAME"
-
-BW_DIR="/opt/bitwarden"
-TEMP_BACKUP="/tmp/bitwarden-full-backup.tar.gz"
-
-# 创建备份
-tar -czf "$TEMP_BACKUP" -C "$BW_DIR" . || exit 1
-
-# 加密
-gpg --batch --yes --passphrase "$PASSPHRASE" --symmetric --cipher-algo AES256 "$TEMP_BACKUP"
-mv "$TEMP_BACKUP.gpg" "$ENC_PATH"
-rm -f "$TEMP_BACKUP"
-
-upload_to_r2() {
-    local remote=$1
-    local file=$2
-    rclone copy "$file" "$remote" --progress
-    echo "✅ 备份已上传至 $remote: $(basename "$file")"
+# Bitwarden配置
+DOMAIN="$DOMAIN"
+EMAIL="$EMAIL"
+IP_VERSION="$IP_VERSION"
+NOTIFICATION_TYPE="$NOTIFICATION_TYPE"
+TELEGRAM_BOT_TOKEN="$TELEGRAM_BOT_TOKEN"
+TELEGRAM_CHAT_ID="$TELEGRAM_CHAT_ID"
+EMAIL_TO="$EMAIL_TO"
+CF_ACCOUNT_ID_1="$CF_ACCOUNT_ID_1"
+CF_R2_ACCESS_KEY_1="$CF_R2_ACCESS_KEY_1"
+CF_R2_SECRET_KEY_1="$CF_R2_SECRET_KEY_1"
+CF_R2_BUCKET_1="$CF_R2_BUCKET_1"
+CF_ACCOUNT_ID_2="$CF_ACCOUNT_ID_2"
+CF_R2_ACCESS_KEY_2="$CF_R2_ACCESS_KEY_2"
+CF_R2_SECRET_KEY_2="$CF_R2_SECRET_KEY_2"
+CF_R2_BUCKET_2="$CF_R2_BUCKET_2"
+BACKUP_ENCRYPTION_KEY="$BACKUP_ENCRYPTION_KEY"
+ENABLE_AUTO_BACKUP="$ENABLE_AUTO_BACKUP"
+EOF
+    
+    chmod 600 "$CONFIG_FILE"
+    success "配置已保存"
 }
-
-RESULT=""
-if upload_to_r2 "r2-$R2_BUCKET_1:$R2_BUCKET_1" "$ENC_PATH"; then
-    RESULT+="Primary R2 ($R2_BUCKET_1): Success\n"
-else
-    RESULT+="Primary R2 ($R2_BUCKET_1): Failed\n"
-fi
-
-sleep 5
-
-if upload_to_r2 "r2-$R2_BUCKET_2:$R2_BUCKET_2" "$ENC_PATH"; then
-    RESULT+="Secondary R2 ($R2_BUCKET_2): Success\n"
-else
-    RESULT+="Secondary R2 ($R2_BUCKET_2): Failed\n"
-fi
 
 # 发送通知
-NOTIFY_LOG="Backup on $(date)\nFiles: $ENCRYPTED_NAME\n$RESULT"
-send_notification "$NOTIFY_LOG"
-EOF
-
-    # 添加 send_notification 函数
-    cat >> "$SCRIPT_DIR/backup.sh" << EOF
 send_notification() {
-    local msg="\$(echo -e "\$1" | sed 's/^/    /')"
-    case "$NOTIFY_METHOD" in
-        telegram)
-            curl -s -X POST "https://api.telegram.org/bot\$TELEGRAM_BOT_TOKEN/sendMessage" \
-                -d chat_id="\$TELEGRAM_CHAT_ID" \
-                -d text="🔔 Bitwarden Backup Report:\n\n\$msg"
+    local message="$1"
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    local full_message="[Bitwarden Backup] $timestamp - $message"
+    
+    case "$NOTIFICATION_TYPE" in
+        "telegram")
+            send_telegram "$full_message"
             ;;
-        email)
-            echo "\$1" | mail -s "BitFields Backup Report - \$(date +%F)" "\$SMTP_USER"
+        "email")
+            send_email "$full_message"
             ;;
-    esac
-}
-EOF
-
-    chmod +x "$SCRIPT_DIR/backup.sh"
-    log "备份脚本已创建：$SCRIPT_DIR/backup.sh"
-}
-
-# ============== 设置定时任务 ==============
-setup_cron() {
-    crontab -l | grep -v 'backup.sh' | crontab -
-    (crontab -l ; echo "$CRON_JOB") 2>/dev/null | crontab -
-    log "每日备份任务已添加（凌晨 2 点执行）"
-}
-
-# ============== 测试通知 ==============
-test_notification() {
-    if ! is_bitwarden_installed; then
-        error_exit "Bitwarden 尚未安装，请先完成初次搭建。"
-    fi
-
-    source "$CONFIG_FILE"
-    local test_msg="🔧 Bitwarden 一键脚本通知测试\n时间：$(date)\n状态：一切正常 ✅"
-
-    case "$NOTIFY_METHOD" in
-        telegram)
-            response=$(curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
-                -d chat_id="$TELEGRAM_CHAT_ID" \
-                -d text="$test_msg")
-            if echo "$response" | jq -e '.ok == true' >/dev/null; then
-                log "${GREEN}Telegram 测试消息发送成功！${NC}"
-            else
-                error_exit "Telegram 发送失败：$response"
-            fi
-            ;;
-        email)
-            echo -e "$test_msg" | mail -s "BitFields Test Notification" "$SMTP_USER"
-            log "${GREEN}邮件测试已发送至 $SMTP_USER${NC}"
+        "both")
+            send_telegram "$full_message"
+            send_email "$full_message"
             ;;
         *)
-            error_exit "无效的通知方式"
+            log "通知已禁用或未配置"
             ;;
     esac
 }
 
-# ============== 清理部署 ==============
-cleanup_all() {
-    read -p "⚠️  此操作将删除 Bitwarden、Caddy、备份和所有相关数据！确认？(y/N): " -n1 -r
-    echo
-    [[ ! $REPLY =~ ^[Yy]$ ]] && return
-
-    log "正在清理..."
-
-    # 停止服务
-    if [[ -d "/opt/bitwarden" ]]; then
-        cd /opt/bitwarden && docker-compose down 2>/dev/null || true
+# 发送Telegram通知
+send_telegram() {
+    local message="$1"
+    if [[ -n "$TELEGRAM_BOT_TOKEN" && -n "$TELEGRAM_CHAT_ID" ]]; then
+        curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
+            -d chat_id="$TELEGRAM_CHAT_ID" \
+            -d text="$message" \
+            -d parse_mode="Markdown" > /dev/null 2>&1
     fi
+}
 
+# 发送邮件通知
+send_email() {
+    local message="$1"
+    if [[ -n "$EMAIL_TO" ]]; then
+        echo "$message" | mail -s "Bitwarden Backup Notification" "$EMAIL_TO" 2>/dev/null || \
+        log "邮件发送失败，请检查邮件配置"
+    fi
+}
+
+# 测试通知
+test_notification() {
+    log "测试通知功能..."
+    
+    if [[ "$NOTIFICATION_TYPE" == "none" ]]; then
+        warning "通知功能未启用"
+        return
+    fi
+    
+    send_notification "测试通知: Bitwarden备份系统正常工作"
+    success "测试通知已发送"
+}
+
+# 配置通知
+setup_notification() {
+    echo ""
+    echo "=== 配置通知方式 ==="
+    echo "1) 不启用通知"
+    echo "2) Telegram通知"
+    echo "3) 邮件通知"
+    echo "4) 同时启用Telegram和邮件"
+    read -p "请选择通知方式 (1-4): " notif_choice
+    
+    case $notif_choice in
+        1)
+            NOTIFICATION_TYPE="none"
+            ;;
+        2)
+            NOTIFICATION_TYPE="telegram"
+            read -p "请输入Telegram Bot Token: " TELEGRAM_BOT_TOKEN
+            read -p "请输入Telegram Chat ID: " TELEGRAM_CHAT_ID
+            ;;
+        3)
+            NOTIFICATION_TYPE="email"
+            read -p "请输入接收通知的邮箱: " EMAIL_TO
+            ;;
+        4)
+            NOTIFICATION_TYPE="both"
+            read -p "请输入Telegram Bot Token: " TELEGRAM_BOT_TOKEN
+            read -p "请输入Telegram Chat ID: " TELEGRAM_CHAT_ID
+            read -p "请输入接收通知的邮箱: " EMAIL_TO
+            ;;
+        *)
+            NOTIFICATION_TYPE="none"
+            ;;
+    esac
+}
+
+# 配置Cloudflare R2
+setup_r2() {
+    echo ""
+    echo "=== 配置Cloudflare R2备份 ==="
+    
+    # 第一个R2账户
+    echo "配置第一个Cloudflare R2账户:"
+    read -p "Cloudflare Account ID: " CF_ACCOUNT_ID_1
+    read -p "R2 Access Key ID: " CF_R2_ACCESS_KEY_1
+    read -p "R2 Secret Access Key: " CF_R2_SECRET_KEY_1
+    read -p "R2 Bucket名称: " CF_R2_BUCKET_1
+    
+    # 第二个R2账户
+    echo ""
+    echo "配置第二个Cloudflare R2账户 (可选):"
+    read -p "Cloudflare Account ID (留空跳过): " CF_ACCOUNT_ID_2
+    if [[ -n "$CF_ACCOUNT_ID_2" ]]; then
+        read -p "R2 Access Key ID: " CF_R2_ACCESS_KEY_2
+        read -p "R2 Secret Access Key: " CF_R2_SECRET_KEY_2
+        read -p "R2 Bucket名称: " CF_R2_BUCKET_2
+    fi
+    
+    # 生成备份加密密钥
+    if [[ -z "$BACKUP_ENCRYPTION_KEY" ]]; then
+        BACKUP_ENCRYPTION_KEY=$(openssl rand -base64 32)
+        log "已生成备份加密密钥"
+    fi
+}
+
+# 安装Bitwarden
+install_bitwarden() {
+    log "开始安装Bitwarden..."
+    
+    # 创建目录
+    mkdir -p "$DATA_DIR" "$BACKUP_DIR"
+    
+    # 下载Bitwarden安装脚本
+    cd /opt/bitwarden
+    if [[ ! -f "bitwarden.sh" ]]; then
+        curl -Lso bitwarden.sh https://go.btwrdn.co/bw-sh
+        chmod +x bitwarden.sh
+    fi
+    
+    # 运行安装脚本
+    ./bitwarden.sh install
+    
+    # 配置域名和SSL
+    if [[ -n "$DOMAIN" ]]; then
+        ./bitwarden.sh config-domain "$DOMAIN"
+    fi
+    
+    # 启动Bitwarden
+    ./bitwarden.sh start
+    
+    success "Bitwarden安装完成"
+}
+
+# 配置Caddy反代
+setup_caddy() {
+    log "配置Caddy反代..."
+    
+    # 创建Caddyfile
+    cat > /opt/bitwarden/Caddyfile << EOF
+$DOMAIN {
+    encode gzip
+    log {
+        output file /opt/bitwarden/logs/access.log {
+            roll_size 10mb
+            roll_keep 10
+        }
+    }
+    
+    # 根据选择的IP版本配置
+    reverse_proxy $IP_VERSION://localhost:8080
+    
+    # 安全头
+    header {
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+        X-XSS-Protection "1; mode=block"
+        -Server
+    }
+}
+EOF
+    
+    # 获取SSL证书
+    log "获取SSL证书..."
+    if [[ "$IP_VERSION" == "ipv6" ]]; then
+        certbot certonly --standalone --preferred-challenges http -d "$DOMAIN" \
+            --agree-tos --email "$EMAIL" --force-renewal --expand \
+            --pre-hook "systemctl stop caddy" \
+            --post-hook "systemctl start caddy" \
+            --allow-subset-of-names
+    else
+        certbot certonly --standalone --preferred-challenges http -d "$DOMAIN" \
+            --agree-tos --email "$EMAIL" --force-renewal --expand
+    fi
+    
+    # 配置证书自动续期
+    echo "0 0 * * * certbot renew --quiet --post-hook 'systemctl reload caddy'" >> /etc/crontab
+    
+    success "Caddy反代配置完成"
+}
+
+# 创建备份脚本
+create_backup_script() {
+    cat > /opt/bitwarden/backup.sh << 'EOF'
+#!/bin/bash
+
+set -e
+
+# 加载配置
+source /opt/bitwarden/config.sh
+
+# 变量
+TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
+BACKUP_NAME="bitwarden_backup_$TIMESTAMP"
+BACKUP_FILE="$BACKUP_DIR/$BACKUP_NAME.tar.gz"
+ENCRYPTED_FILE="$BACKUP_FILE.enc"
+LOG_FILE="/var/log/bitwarden_backup.log"
+
+# 日志函数
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
+}
+
+# 加密备份
+encrypt_backup() {
+    local input_file="$1"
+    local output_file="$2"
+    
+    openssl enc -aes-256-cbc -salt -in "$input_file" -out "$output_file" \
+        -pass pass:"$BACKUP_ENCRYPTION_KEY" 2>/dev/null
+    
+    if [[ $? -eq 0 ]]; then
+        log "备份文件已加密: $output_file"
+        rm -f "$input_file"
+    else
+        log "加密失败"
+        return 1
+    fi
+}
+
+# 上传到R2
+upload_to_r2() {
+    local file="$1"
+    local account_id="$2"
+    local access_key="$3"
+    local secret_key="$4"
+    local bucket="$5"
+    local endpoint="https://$account_id.r2.cloudflarestorage.com"
+    
+    # 使用curl上传
+    curl -X PUT "$endpoint/$bucket/$BACKUP_NAME.tar.gz.enc" \
+        -H "Authorization: Bearer $access_key" \
+        -H "X-Amz-Date: $(date -u +'%Y%m%dT%H%M%SZ')" \
+        -H "Content-Type: application/octet-stream" \
+        --data-binary @"$file" \
+        --silent --show-error
+    
+    if [[ $? -eq 0 ]]; then
+        log "成功上传到R2: $bucket"
+        return 0
+    else
+        log "上传到R2失败: $bucket"
+        return 1
+    fi
+}
+
+# 主备份函数
+backup() {
+    log "开始Bitwarden备份..."
+    
+    # 停止Bitwarden服务
+    cd /opt/bitwarden
+    ./bitwarden.sh stop
+    
+    # 创建备份
+    tar -czf "$BACKUP_FILE" \
+        -C /opt/bitwarden \
+        --exclude="*.log" \
+        --exclude="*.tmp" \
+        .
+    
+    # 加密备份
+    encrypt_backup "$BACKUP_FILE" "$ENCRYPTED_FILE"
+    
+    # 上传到第一个R2
+    if [[ -n "$CF_ACCOUNT_ID_1" ]]; then
+        upload_to_r2 "$ENCRYPTED_FILE" "$CF_ACCOUNT_ID_1" "$CF_R2_ACCESS_KEY_1" \
+            "$CF_R2_SECRET_KEY_1" "$CF_R2_BUCKET_1"
+        UPLOAD_1_RESULT=$?
+    fi
+    
+    # 上传到第二个R2
+    if [[ -n "$CF_ACCOUNT_ID_2" ]]; then
+        upload_to_r2 "$ENCRYPTED_FILE" "$CF_ACCOUNT_ID_2" "$CF_R2_ACCESS_KEY_2" \
+            "$CF_R2_SECRET_KEY_2" "$CF_R2_BUCKET_2"
+        UPLOAD_2_RESULT=$?
+    fi
+    
+    # 清理旧备份（保留最近7天）
+    find "$BACKUP_DIR" -name "bitwarden_backup_*.tar.gz.enc" -mtime +7 -delete
+    
+    # 启动Bitwarden服务
+    ./bitwarden.sh start
+    
+    # 发送通知
+    local message="备份完成\n"
+    message+="时间: $TIMESTAMP\n"
+    message+="备份文件: $BACKUP_NAME.tar.gz.enc\n"
+    message+="文件大小: $(du -h "$ENCRYPTED_FILE" | cut -f1)\n"
+    
+    if [[ -n "$CF_ACCOUNT_ID_1" ]]; then
+        if [[ $UPLOAD_1_RESULT -eq 0 ]]; then
+            message+="✅ R2账户1: $CF_R2_BUCKET_1\n"
+        else
+            message+="❌ R2账户1: 上传失败\n"
+        fi
+    fi
+    
+    if [[ -n "$CF_ACCOUNT_ID_2" ]]; then
+        if [[ $UPLOAD_2_RESULT -eq 0 ]]; then
+            message+="✅ R2账户2: $CF_R2_BUCKET_2\n"
+        else
+            message+="❌ R2账户2: 上传失败\n"
+        fi
+    fi
+    
+    send_notification "$message"
+    log "备份流程完成"
+}
+
+# 执行备份
+backup
+EOF
+    
+    chmod +x /opt/bitwarden/backup.sh
+    
+    # 添加定时任务
+    if [[ "$ENABLE_AUTO_BACKUP" == "true" ]]; then
+        echo "0 2 * * * /opt/bitwarden/backup.sh" >> /etc/crontab
+        log "已添加自动备份定时任务 (每天凌晨2点)"
+    fi
+}
+
+# 恢复备份
+restore_backup() {
+    log "开始恢复Bitwarden..."
+    
+    echo "请选择恢复方式:"
+    echo "1) 从本地备份恢复"
+    echo "2) 从Cloudflare R2恢复"
+    read -p "请选择 (1-2): " restore_choice
+    
+    case $restore_choice in
+        1)
+            restore_from_local
+            ;;
+        2)
+            restore_from_r2
+            ;;
+        *)
+            error "无效的选择"
+            ;;
+    esac
+}
+
+# 从本地恢复
+restore_from_local() {
+    echo "可用的本地备份:"
+    ls -lh "$BACKUP_DIR"
+    local backups=($(ls -t "$BACKUP_DIR"/*.tar.gz.enc 2>/dev/null))
+    
+    if [[ ${#backups[@]} -eq 0 ]]; then
+        error "没有找到本地备份文件"
+    fi
+    
+    echo "请选择要恢复的备份:"
+    for i in "${!backups[@]}"; do
+        echo "$((i+1))) ${backups[$i]}"
+    done
+    
+    read -p "请输入编号: " backup_num
+    selected_backup="${backups[$((backup_num-1))]}"
+    
+    if [[ ! -f "$selected_backup" ]]; then
+        error "选择的备份文件不存在"
+    fi
+    
+    # 解密备份
+    log "解密备份文件..."
+    DECRYPTED_FILE="${selected_backup%.enc}"
+    openssl enc -aes-256-cbc -d -in "$selected_backup" -out "$DECRYPTED_FILE" \
+        -pass pass:"$BACKUP_ENCRYPTION_KEY" 2>/dev/null || error "解密失败，请检查加密密钥"
+    
+    # 停止服务
+    cd /opt/bitwarden
+    ./bitwarden.sh stop
+    
+    # 恢复文件
+    log "恢复文件..."
+    tar -xzf "$DECRYPTED_FILE" -C /opt/bitwarden --strip-components=1
+    
+    # 清理解密文件
+    rm -f "$DECRYPTED_FILE"
+    
+    # 启动服务
+    ./bitwarden.sh start
+    
+    success "恢复完成"
+}
+
+# 从R2恢复
+restore_from_r2() {
+    echo "请选择R2账户:"
+    echo "1) 第一个R2账户"
+    echo "2) 第二个R2账户"
+    read -p "请选择 (1-2): " r2_choice
+    
+    case $r2_choice in
+        1)
+            account_id="$CF_ACCOUNT_ID_1"
+            access_key="$CF_R2_ACCESS_KEY_1"
+            secret_key="$CF_R2_SECRET_KEY_1"
+            bucket="$CF_R2_BUCKET_1"
+            ;;
+        2)
+            account_id="$CF_ACCOUNT_ID_2"
+            access_key="$CF_R2_ACCESS_KEY_2"
+            secret_key="$CF_R2_SECRET_KEY_2"
+            bucket="$CF_R2_BUCKET_2"
+            ;;
+        *)
+            error "无效的选择"
+            ;;
+    esac
+    
+    if [[ -z "$account_id" ]]; then
+        error "选择的R2账户未配置"
+    fi
+    
+    # 列出R2中的备份文件
+    log "获取R2备份列表..."
+    endpoint="https://$account_id.r2.cloudflarestorage.com"
+    
+    # 获取备份列表
+    backup_list=$(curl -s -X GET "$endpoint/$bucket" \
+        -H "Authorization: Bearer $access_key" \
+        -H "X-Amz-Date: $(date -u +'%Y%m%dT%H%M%SZ')" | grep -o 'bitwarden_backup_[^<]*' | sort -r)
+    
+    if [[ -z "$backup_list" ]]; then
+        error "R2中没有找到备份文件"
+    fi
+    
+    echo "可用的R2备份:"
+    select backup_name in $backup_list; do
+        if [[ -n "$backup_name" ]]; then
+            break
+        fi
+    done
+    
+    # 下载备份
+    log "下载备份文件: $backup_name"
+    ENCRYPTED_FILE="$BACKUP_DIR/$backup_name"
+    
+    curl -s -X GET "$endpoint/$bucket/$backup_name" \
+        -H "Authorization: Bearer $access_key" \
+        -H "X-Amz-Date: $(date -u +'%Y%m%dT%H%M%SZ')" \
+        -o "$ENCRYPTED_FILE" || error "下载失败"
+    
+    # 解密并恢复
+    DECRYPTED_FILE="${ENCRYPTED_FILE%.enc}"
+    openssl enc -aes-256-cbc -d -in "$ENCRYPTED_FILE" -out "$DECRYPTED_FILE" \
+        -pass pass:"$BACKUP_ENCRYPTION_KEY" 2>/dev/null || error "解密失败"
+    
+    # 停止服务
+    cd /opt/bitwarden
+    ./bitwarden.sh stop
+    
+    # 恢复文件
+    tar -xzf "$DECRYPTED_FILE" -C /opt/bitwarden --strip-components=1
+    
+    # 清理文件
+    rm -f "$ENCRYPTED_FILE" "$DECRYPTED_FILE"
+    
+    # 启动服务
+    ./bitwarden.sh start
+    
+    success "从R2恢复完成"
+}
+
+# 检查Bitwarden状态
+check_bitwarden_status() {
+    if [[ -f "/opt/bitwarden/bitwarden.sh" ]]; then
+        cd /opt/bitwarden
+        if ./bitwarden.sh status | grep -q "running"; then
+            return 0
+        else
+            return 1
+        fi
+    else
+        return 2
+    fi
+}
+
+# 删除Bitwarden
+remove_bitwarden() {
+    warning "警告：这将删除所有Bitwarden数据！"
+    read -p "确认删除？(输入yes继续): " confirm
+    
+    if [[ "$confirm" != "yes" ]]; then
+        log "取消删除操作"
+        return
+    fi
+    
+    log "开始删除Bitwarden..."
+    
+    # 停止服务
+    if [[ -f "/opt/bitwarden/bitwarden.sh" ]]; then
+        cd /opt/bitwarden
+        ./bitwarden.sh stop
+        ./bitwarden.sh uninstall
+    fi
+    
     # 删除目录
     rm -rf /opt/bitwarden
-    rm -rf /etc/caddy
-    rm -f /etc/systemd/system/caddy.service
-    systemctl disable caddy 2>/dev/null || true
-
-    # 删除 cron
-    crontab -l | grep -v 'backup.sh' | crontab -
-
-    # 删除 rclone
-    sed -i '/r2-/d' ~/.config/rclone/rclone.conf 2>/dev/null || true
-
-    log "${GREEN}清理完成！${NC}"
+    rm -f "$CONFIG_FILE"
+    
+    # 删除定时任务
+    sed -i '/bitwarden_backup/d' /etc/crontab
+    sed -i '/certbot renew/d' /etc/crontab
+    
+    success "Bitwarden已完全删除"
 }
 
-# ============== 恢复流程 ==============
-restore_bitwarden() {
-    source "$CONFIG_FILE"
-    local bw_dir="/opt/bitwarden"
-    mkdir -p "$bw_dir"
+# 主菜单
+main_menu() {
+    clear
+    echo "========================================"
+    echo "    Bitwarden自托管管理脚本"
+    echo "========================================"
+    echo ""
+    
+    # 检查Bitwarden状态
+    check_bitwarden_status
+    bitwarden_status=$?
+    
+    case $bitwarden_status in
+        0)
+            echo "📊 Bitwarden状态: ${GREEN}运行中${NC}"
+            ;;
+        1)
+            echo "📊 Bitwarden状态: ${YELLOW}已安装但未运行${NC}"
+            ;;
+        2)
+            echo "📊 Bitwarden状态: ${RED}未安装${NC}"
+            ;;
+    esac
+    
+    echo ""
+    echo "请选择操作:"
+    echo "1) 初次安装Bitwarden"
+    echo "2) 恢复Bitwarden"
+    echo "3) 手动执行备份"
+    echo "4) 测试通知功能"
+    echo "5) 删除Bitwarden"
+    echo "6) 查看日志"
+    echo "7) 退出"
+    echo ""
+    
+    read -p "请输入选项 (1-7): " choice
+    
+    case $choice in
+        1)
+            initial_setup
+            ;;
+        2)
+            restore_setup
+            ;;
+        3)
+            manual_backup
+            ;;
+        4)
+            test_notification
+            ;;
+        5)
+            remove_bitwarden
+            ;;
+        6)
+            view_logs
+            ;;
+        7)
+            exit 0
+            ;;
+        *)
+            error "无效选项"
+            ;;
+    esac
+}
 
-    log "请输入要恢复的加密备份文件名（位于 $BACKUP_DIR），例如：bitwarden-backup-20240405-100000.tar.gz.gpg"
-    read -r backup_file
-    local full_path="$BACKUP_DIR/$backup_file"
-
-    if [[ ! -f "$full_path" ]]; then
-        error_exit "文件不存在：$full_path"
+# 初始安装
+initial_setup() {
+    log "开始初始安装流程..."
+    
+    # 检查依赖
+    if ! command -v docker &> /dev/null; then
+        install_dependencies
     fi
-
-    export PASSPHRASE="$ENCRYPTION_PASSWORD"
-    local decrypted="/tmp/restored-backup.tar.gz"
-
-    # 解密
-    gpg --batch --yes --passphrase "$PASSPHRASE" --decrypt "$full_path" > "$decrypted" 2>/dev/null || error_exit "解密失败，请检查密码"
-
-    # 提取
-    mkdir -p "$bw_dir.tmp"
-    tar -xzf "$decrypted" -C "$bw_dir.tmp"
-    cp -r "$bw_dir.tmp/"* "$bw_dir/"
-    rm -rf "$bw_dir.tmp" "$decrypted"
-
-    cd "$bw_dir"
-    docker-compose up -d
-
-    log "${GREEN}恢复完成！请访问 $DOMAIN${NC}"
+    
+    # 获取用户输入
+    echo ""
+    echo "=== Bitwarden安装配置 ==="
+    read -p "请输入域名 (例如: vault.example.com): " DOMAIN
+    read -p "请输入邮箱 (用于SSL证书): " EMAIL
+    
+    echo ""
+    echo "请选择反代IP版本:"
+    echo "1) IPv4"
+    echo "2) IPv6"
+    read -p "请选择 (1-2): " ip_choice
+    
+    case $ip_choice in
+        1)
+            IP_VERSION="ipv4"
+            ;;
+        2)
+            IP_VERSION="ipv6"
+            ;;
+        *)
+            IP_VERSION="ipv4"
+            ;;
+    esac
+    
+    # 配置通知
+    setup_notification
+    
+    # 配置R2备份
+    setup_r2
+    
+    # 保存配置
+    save_config
+    
+    # 安装Bitwarden
+    install_bitwarden
+    
+    # 配置Caddy反代
+    if [[ -n "$DOMAIN" ]]; then
+        setup_caddy
+    fi
+    
+    # 创建备份脚本
+    create_backup_script
+    
+    # 发送安装完成通知
+    send_notification "Bitwarden安装完成\n域名: $DOMAIN\nIP版本: $IP_VERSION\n备份已配置: ${ENABLE_AUTO_BACKUP}"
+    
+    success "Bitwarden初始安装完成！"
+    echo ""
+    echo "访问地址: https://$DOMAIN"
+    echo "管理目录: /opt/bitwarden"
+    echo "备份目录: $BACKUP_DIR"
+    echo ""
+    read -p "按Enter键返回主菜单..." -n 1
 }
 
-# ============== 主函数 ==============
-main() {
-    while true; do
-        show_menu
-        read -p "请选择操作 [1-5]: " choice
-        echo
+# 恢复安装
+restore_setup() {
+    log "开始恢复安装流程..."
+    
+    # 检查是否有配置文件
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        warning "未找到配置文件，将进行全新安装"
+        initial_setup
+        return
+    fi
+    
+    # 加载配置
+    load_config
+    
+    # 检查依赖
+    if ! command -v docker &> /dev/null; then
+        install_dependencies
+    fi
+    
+    # 恢复备份
+    restore_backup
+    
+    # 重新配置Caddy
+    if [[ -n "$DOMAIN" ]]; then
+        setup_caddy
+    fi
+    
+    # 重新创建备份脚本
+    create_backup_script
+    
+    success "Bitwarden恢复完成！"
+    read -p "按Enter键返回主菜单..." -n 1
+}
 
-        case $choice in
-            1)
-                log "开始初次搭建..."
-                load_or_ask_config
-                install_dependencies
-                setup_bitwarden
-                setup_caddy
-                setup_rclone
-                create_backup_script
-                setup_cron
-                log "${GREEN}🎉 初次搭建完成！Bitwarden 已运行在 $DOMAIN${NC}"
-                ;;
-            2)
-                if ! is_bitwarden_installed; then
-                    log "未检测到 Bitwarden 安装，开始恢复流程..."
-                    load_or_ask_config
-                    install_dependencies
-                    setup_rclone
-                    restore_bitwarden
-                else
-                    log "已存在 Bitwarden 实例。"
-                    read -p "是否继续恢复？这会覆盖现有数据！(y/N): " -n1 -r
-                    echo
-                    [[ $REPLY =~ ^[Yy]$ ]] && restore_bitwarden
-                fi
-                ;;
-            3)
-                if [[ -f "$CONFIG_FILE" ]]; then
-                    test_notification
-                else
-                    error_exit "未找到配置文件，请先完成初次搭建。"
-                fi
-                ;;
-            4)
-                cleanup_all
-                ;;
-            5)
-                log "再见！"
-                exit 0
-                ;;
-            *)
-                log "${RED}无效选项${NC}"
-                ;;
-        esac
+# 手动备份
+manual_backup() {
+    log "执行手动备份..."
+    
+    if [[ ! -f "/opt/bitwarden/backup.sh" ]]; then
+        error "备份脚本不存在，请先完成初始安装"
+    fi
+    
+    /opt/bitwarden/backup.sh
+    
+    success "手动备份完成"
+    read -p "按Enter键返回主菜单..." -n 1
+}
+
+# 查看日志
+view_logs() {
+    echo ""
+    echo "=== 系统日志 ==="
+    echo "1) 安装日志"
+    echo "2) 备份日志"
+    echo "3) Caddy访问日志"
+    echo "4) 返回"
+    echo ""
+    
+    read -p "请选择: " log_choice
+    
+    case $log_choice in
+        1)
+            less "$LOG_FILE"
+            ;;
+        2)
+            less "/var/log/bitwarden_backup.log"
+            ;;
+        3)
+            less "/opt/bitwarden/logs/access.log"
+            ;;
+        4)
+            return
+            ;;
+        *)
+            error "无效选项"
+            ;;
+    esac
+}
+
+# 初始化
+init() {
+    check_root
+    check_system
+    load_config
+    
+    # 创建必要目录
+    mkdir -p /opt/bitwarden/logs
+    mkdir -p "$BACKUP_DIR"
+    
+    # 设置定时任务检查
+    if [[ ! -f /etc/cron.d/bitwarden_cleanup ]]; then
+        echo "0 3 * * * root find /opt/bitwarden/logs -name '*.log' -mtime +30 -delete" > /etc/cron.d/bitwarden_cleanup
+    fi
+}
+
+# 主程序
+main() {
+    init
+    
+    while true; do
+        main_menu
     done
 }
 
-# ============== 执行入口 ==============
-if [[ "$EUID" -ne 0 ]]; then
-    error_exit "请以 root 或 sudo 运行此脚本"
-fi
-
-mkdir -p /opt/bitwarden /var/log
-touch "$LOG_FILE"
-
-# 检查 rclone 是否存在，否则安装
-if ! command -v rclone &> /dev/null; then
-    curl https://rclone.org/install.sh | bash
-fi
-
-# 创建 GPG 密钥（用于加密）
-if ! command -v gpg &> /dev/null; then
-    apt-get install -y gnupg
-fi
-
-# 生成临时密钥（仅用于脚本内加密）
-if ! gpg --list-keys "$ENCRYPTION_PASSWORD" 2>/dev/null; then
-    cat > /tmp/gpg-batch << EOF
-%echo Generating a basic OpenPGP key
-Key-Type: RSA
-Key-Length: 2048
-Subkey-Type: RSA
-Subkey-Length: 2048
-Name-Real: Bitwarden Backup
-Name-Email: backup@local
-Expire-Date: 0
-Passphrase: $ENCRYPTION_PASSWORD
-%commit
-%echo Done
-EOF
-    gpg --batch --gen-key /tmp/gpg-batch 2>/dev/null || true
-    rm -f /tmp/gpg-batch
-fi
-
-# 启动主菜单
-main
+# 执行主程序
+main "$@"
