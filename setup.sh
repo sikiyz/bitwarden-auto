@@ -1,5 +1,3 @@
-# 创建修复版的一键脚本
-cat > bitwarden_fixed.sh << 'EOF'
 #!/bin/bash
 
 # Bitwarden一键安装脚本 - 修复版
@@ -80,6 +78,21 @@ get_config() {
     
     read -p "请输入邮箱 (用于SSL证书): " EMAIL
     
+    # 端口配置
+    echo ""
+    echo "=== 端口配置 ==="
+    read -p "请输入Vaultwarden Web端口 [默认: 8080]: " VAULTWARDEN_PORT
+    VAULTWARDEN_PORT=${VAULTWARDEN_PORT:-8080}
+    
+    read -p "请输入WebSocket端口 [默认: 3012]: " WEBSOCKET_PORT
+    WEBSOCKET_PORT=${WEBSOCKET_PORT:-3012}
+    
+    read -p "请输入HTTP端口 [默认: 80]: " HTTP_PORT
+    HTTP_PORT=${HTTP_PORT:-80}
+    
+    read -p "请输入HTTPS端口 [默认: 443]: " HTTPS_PORT
+    HTTPS_PORT=${HTTPS_PORT:-443}
+    
     # IP版本
     echo ""
     echo "选择反代IP版本:"
@@ -158,6 +171,10 @@ create_configs() {
     cat > /opt/bitwarden/config.env << CONFIG_EOF
 DOMAIN="$DOMAIN"
 EMAIL="$EMAIL"
+VAULTWARDEN_PORT="$VAULTWARDEN_PORT"
+WEBSOCKET_PORT="$WEBSOCKET_PORT"
+HTTP_PORT="$HTTP_PORT"
+HTTPS_PORT="$HTTPS_PORT"
 IP_VERSION="$IP_VERSION"
 NOTIFICATION_TYPE="$NOTIFICATION_TYPE"
 TELEGRAM_BOT_TOKEN="$TELEGRAM_BOT_TOKEN"
@@ -185,8 +202,8 @@ services:
     container_name: vaultwarden
     restart: unless-stopped
     ports:
-      - "127.0.0.1:8080:80"
-      - "127.0.0.1:3012:3012"
+      - "127.0.0.1:$VAULTWARDEN_PORT:80"
+      - "127.0.0.1:$WEBSOCKET_PORT:3012"
     volumes:
       - ./data:/data
     environment:
@@ -205,9 +222,9 @@ services:
     container_name: caddy
     restart: unless-stopped
     ports:
-      - "80:80"
-      - "443:443"
-      - "443:443/udp"
+      - "$HTTP_PORT:80"
+      - "$HTTPS_PORT:443"
+      - "$HTTPS_PORT:443/udp"
     volumes:
       - ./config/Caddyfile:/etc/caddy/Caddyfile:ro
       - ./caddy_data:/data
@@ -224,12 +241,14 @@ DOCKER_EOF
 }
 
 # HTTP重定向到HTTPS
-http://$DOMAIN {
+:$HTTP_PORT {
+    bind 0.0.0.0
     redir https://$DOMAIN{uri}
 }
 
 # HTTPS站点
-$DOMAIN {
+:$HTTPS_PORT {
+    bind 0.0.0.0
     encode gzip
     
     # 根据IP版本配置
@@ -433,7 +452,6 @@ show_menu() {
     echo "10) 退出"
     echo ""
 }
-
 test_notification() {
     source /opt/bitwarden/config.env 2>/dev/null || {
         echo "配置文件不存在"
@@ -472,6 +490,7 @@ test_notification() {
             ;;
     esac
 }
+
 uninstall_service() {
     echo "⚠️  警告：这将删除所有数据！"
     read -p "确认卸载？(输入yes继续): " confirm
@@ -509,10 +528,29 @@ while true; do
             echo "3) 所有日志"
             read -p "选择: " log_choice
             cd /opt/bitwarden 2>/dev/null || { echo "目录不存在"; break; }
+            
+            # 加载端口配置
+            if [[ -f "/opt/bitwarden/config.env" ]]; then
+                source /opt/bitwarden/config.env 2>/dev/null || true
+            fi
+            
             case $log_choice in
-                1) docker-compose logs vaultwarden -f --tail=50 ;;
-                2) docker-compose logs caddy -f --tail=50 ;;
-                3) docker-compose logs -f --tail=50 ;;
+                1) 
+                    echo "Vaultwarden运行在端口: ${VAULTWARDEN_PORT:-8080}"
+                    docker-compose logs vaultwarden -f --tail=50 
+                    ;;
+                2) 
+                    echo "Caddy运行在端口: HTTP:${HTTP_PORT:-80}, HTTPS:${HTTPS_PORT:-443}"
+                    docker-compose logs caddy -f --tail=50 
+                    ;;
+                3) 
+                    echo "端口信息:"
+                    echo "- Vaultwarden: ${VAULTWARDEN_PORT:-8080}"
+                    echo "- WebSocket: ${WEBSOCKET_PORT:-3012}"
+                    echo "- HTTP: ${HTTP_PORT:-80}"
+                    echo "- HTTPS: ${HTTPS_PORT:-443}"
+                    docker-compose logs -f --tail=50 
+                    ;;
                 *) echo "无效选择" ;;
             esac
             ;;
@@ -640,6 +678,11 @@ echo ""
 echo "恢复完成！"
 echo "访问地址: https://$DOMAIN"
 echo "管理令牌: $ADMIN_TOKEN"
+echo "端口配置:"
+echo "- Vaultwarden: ${VAULTWARDEN_PORT:-8080}"
+echo "- WebSocket: ${WEBSOCKET_PORT:-3012}"
+echo "- HTTP: ${HTTP_PORT:-80}"
+echo "- HTTPS: ${HTTPS_PORT:-443}"
 RESTORE_EOF
     
     chmod +x /opt/bitwarden/restore.sh
@@ -689,6 +732,13 @@ show_completion() {
     echo "• 备份目录: /opt/bitwarden/backups"
     echo ""
     
+    echo "🔧 端口配置:"
+    echo "• Vaultwarden Web端口: ${VAULTWARDEN_PORT:-8080}"
+    echo "• WebSocket端口: ${WEBSOCKET_PORT:-3012}"
+    echo "• HTTP端口: ${HTTP_PORT:-80}"
+    echo "• HTTPS端口: ${HTTPS_PORT:-443}"
+    echo ""
+    
     echo "🔧 管理命令:"
     echo "• bw-manage              - 管理面板"
     echo "• /opt/bitwarden/backup.sh  - 手动备份"
@@ -705,13 +755,18 @@ show_completion() {
     echo ""
     
     echo "🌐 访问地址:"
-    echo "• https://${DOMAIN:-请配置域名}"
+    if [[ "${HTTPS_PORT:-443}" == "443" ]]; then
+        echo "• https://${DOMAIN:-请配置域名}"
+    else
+        echo "• https://${DOMAIN:-请配置域名}:${HTTPS_PORT}"
+    fi
     echo ""
     
     echo "⚠️  重要提示:"
     echo "1. 首次访问需要注册管理员账户"
     echo "2. 请妥善保存管理令牌"
     echo "3. 建议立即测试备份功能"
+    echo "4. 如果使用非标准端口，请确保防火墙已开放相应端口"
     echo ""
     
     echo "运行 'bw-manage' 开始管理您的Bitwarden服务"
@@ -842,13 +897,3 @@ elif [[ "$1" == "--restore" ]]; then
 else
     main_menu
 fi
-EOF
-
-# 添加执行权限
-chmod +x bitwarden_fixed.sh
-
-# 运行修复版脚本
-echo "运行修复版Bitwarden一键安装脚本..."
-echo "这次使用Caddy自动SSL，不再需要手动获取证书"
-echo ""
-./bitwarden_fixed.sh
