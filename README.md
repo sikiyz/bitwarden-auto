@@ -1,251 +1,333 @@
----
+# Bitwarden (Vaultwarden) 一键安装脚本
 
-✅ **亮点功能：**
-- ✅ 极简美观 + Markdown 高级排版
-- ✅ 内嵌「运行过程演示」截图描述（纯文本模拟）
-- ✅ 支持一键安装、快捷命令 `bd`
-- ✅ 图标丰富、结构清晰
-- ✅ 中文友好，适合国内用户
+一个功能完整的Bitwarden密码管理器自托管解决方案，基于Vaultwarden，支持IPv4/IPv6双栈，包含自动备份、通知提醒等功能。
 
----
+## 🚀 功能特性
 
-## 📄 `README.md`
+### 核心功能
+- ✅ **Vaultwarden服务器** - Bitwarden API兼容的轻量级实现
+- ✅ **自动SSL证书** - 通过Caddy自动获取Let's Encrypt证书
+- ✅ **IPv4/IPv6双栈支持** - 智能检测并应用优化配置
+- ✅ **WebSocket支持** - 实时密码库同步通知
 
-```markdown
-# 🔐 Bitwarden Auto — 一键部署 | 双 R2 容灾 | GPG 加密备份
+### 备份与恢复
+- 🔄 **自动定时备份** - 每天凌晨2点自动备份
+- ☁️ **Cloudflare R2存储** - 支持双R2账户冗余备份
+- 🔐 **加密备份** - AES-256加密保护备份数据
+- 📅 **本地保留策略** - 自动清理7天前的备份
 
-> 🚀 三分钟部署属于你的私有密码管理服务 —— 安全、自动、高可用  
-> 💾 支持双 Cloudflare R2 备份 + GPG 加密 + 自动 HTTPS + 多通知
+### 通知系统
+- 📱 **Telegram通知** - 备份完成/失败通知
+- 📧 **邮件通知** - SMTP邮件通知
+- 🔔 **多通知渠道** - 可同时启用多种通知方式
 
-![License](https://img.shields.io/github/license/sikiyz/bitwarden-auto)
-![Stars](https://img.shields.io/github/stars/sikiyz/bitwarden-auto?style=social)
-![Forks](https://img.shields.io/github/forks/sikiyz/bitwarden-auto?style=social)
-![Last Commit](https://img.shields.io/github/last-commit/sikiyz/bitwarden-auto)
+### 管理功能
+- 🎛️ **Web管理面板** - 通过 `bw-manage` 命令管理
+- 📊 **服务状态监控** - 实时查看容器状态和日志
+- 🔧 **一键修复工具** - IPv6连接问题快速修复
+- 🔄 **服务更新** - 一键更新到最新版本
 
----
+## 📋 系统要求
 
-## 🌟 为什么选择它？
+- **操作系统**: Ubuntu 20.04+, Debian 10+, CentOS 8+
+- **内存**: 至少1GB RAM
+- **存储**: 至少10GB可用空间
+- **网络**: 公网IP（IPv4或IPv6），开放80/443端口
+- **域名**: 有效的域名（用于SSL证书）
 
-| 特性 | 说明 |
-|------|------|
-| 🔧 全自动部署 | 一行命令搞定 Docker + Caddy + Vaultwarden |
-| 🛡️ 真·数据安全 | 所有备份均使用 **GPG AES256 加密**，云端也无法窥探 |
-| ☁️ 双 R2 容灾 | 同时上传至两个 CF 账号，防止单点故障或误删 |
-| 🕒 智能定时备份 | 每日凌晨 2:00 自动加密上传，并清理过期文件 |
-| 📢 通知提醒 | Telegram / Email 实时推送部署与备份状态 |
-| 🔄 快速恢复 | 支持从 R2 下载并解密还原全部数据 |
-| 🆕 脚本自更新 | 输入 `4` 即可在线拉取最新版脚本 |
-| ⌨️ 快捷命令 `bd` | 部署后可用 `bd` 唤起菜单，随时管理 |
+## 🛠️ 快速开始
 
----
-
-## 🚀 快速开始
-
-### 1. 一键安装（推荐）
-
+### 1. 下载脚本
 ```bash
-curl -fsSL https://raw.githubusercontent.com/sikiyz/bitwarden-auto/main/setup.sh | sudo bash
+wget -O install-bitwarden.sh https://raw.githubusercontent.com/your-repo/bitwarden-installer/main/install.sh
+chmod +x install-bitwarden.sh
 ```
 
-### 2. 或手动运行
-
+### 2. 运行安装
 ```bash
-wget https://raw.githubusercontent.com/sikiyz/bitwarden-auto/main/setup.sh -O setup.sh
-sudo chmod +x setup.sh
-sudo ./setup.sh
+./install-bitwarden.sh
 ```
 
-> ✅ 首次运行将自动创建快捷命令 `bd`，之后只需输入：
->
-> ```bash
-> bd
-> ```
+### 3. 按照向导配置
+安装脚本会引导你完成以下配置：
+- 域名设置
+- 邮箱地址（用于SSL证书）
+- 端口配置
+- IP版本选择（IPv4/IPv6）
+- 通知方式设置
+- Cloudflare R2备份配置
+
+## ⚙️ 详细配置说明
+
+### 域名配置
+- 需要有效的域名，如 `vault.yourdomain.com`
+- 域名必须正确解析到服务器IP地址
+- 建议使用子域名，避免与主站冲突
+
+### 端口配置
+| 端口 | 默认值 | 说明 |
+|------|--------|------|
+| Vaultwarden Web | 8080 | 内部管理端口 |
+| WebSocket | 3012 | 实时通知端口 |
+| HTTP | 80 | 外部HTTP访问端口 |
+| HTTPS | 443 | 外部HTTPS访问端口 |
+
+### IP版本选择
+- **IPv4**: 标准配置，适用于大多数服务器
+- **IPv6**: 优化配置，适用于纯IPv6服务器
+  - 自动应用IPv6绑定优化
+  - 修复Caddy IPv6兼容性问题
+  - 支持IPv6直接访问
+
+### Cloudflare R2配置
+需要准备以下信息：
+1. Cloudflare Account ID
+2. R2 Access Key ID
+3. R2 Secret Access Key
+4. R2 Bucket名称
+
+支持配置两个R2账户，实现备份冗余。
+
+## 🎮 管理命令
+
+### 主管理命令
+```bash
+bw-manage
+```
+
+### 常用操作
+```bash
+# 启动服务
+bw-manage start
+
+# 停止服务
+bw-manage stop
+
+# 重启服务
+bw-manage restart
+
+# 查看状态
+bw-manage status
+
+# 查看日志
+bw-manage logs
+
+# 手动备份
+bw-manage backup
+
+# 测试通知
+bw-manage test-notification
+
+# 更新服务
+bw-manage update
+
+# IPv6诊断
+bw-manage diagnose-ipv6
+```
+
+### 独立脚本
+```bash
+# 手动备份
+/opt/bitwarden/backup.sh
+
+# 恢复备份
+/opt/bitwarden/restore.sh
+
+# 卸载服务（谨慎使用）
+/opt/bitwarden/manage.sh  # 选择卸载选项
+```
+
+## 🔧 故障排除
+
+### 常见问题
+
+#### 1. 无法访问HTTPS
+```bash
+# 检查服务状态
+docker-compose ps
+
+# 查看Caddy日志
+docker-compose logs caddy
+
+# 检查防火墙
+sudo ufw status
+```
+
+#### 2. IPv6连接问题
+```bash
+# 运行IPv6诊断
+bw-manage diagnose-ipv6
+
+# 快速修复IPv6
+./install-bitwarden.sh --fix-ipv6
+
+# 测试IPv6连接
+curl -6 -v -k https://your-domain.com
+```
+
+#### 3. 证书获取失败
+```bash
+# 检查域名解析
+nslookup your-domain.com
+
+# 检查80/443端口是否开放
+sudo netstat -tlnp | grep -E ':(80|443)'
+
+# 清理Caddy证书缓存
+rm -rf /opt/bitwarden/caddy_data/*
+docker-compose restart caddy
+```
+
+#### 4. 备份失败
+```bash
+# 检查R2配置
+cat /opt/bitwarden/config.env | grep CF_
+
+# 手动测试R2连接
+/opt/bitwarden/backup.sh
+
+# 查看备份日志
+tail -f /var/log/bitwarden_backup.log
+```
+
+### 日志位置
+- **Vaultwarden日志**: `/opt/bitwarden/data/vaultwarden.log`
+- **Caddy访问日志**: `/opt/bitwarden/caddy_data/access.log`
+- **备份日志**: `/var/log/bitwarden_backup.log`
+- **Docker容器日志**: `docker-compose logs`
+
+## 🔄 更新与维护
+
+### 更新服务
+```bash
+cd /opt/bitwarden
+docker-compose pull
+docker-compose down
+docker-compose up -d
+```
+
+### 数据备份与迁移
+1. **备份数据**:
+   ```bash
+   /opt/bitwarden/backup.sh
+   ```
+
+2. **迁移到新服务器**:
+   - 在新服务器运行安装脚本
+   - 将备份文件复制到新服务器
+   - 运行恢复脚本: `/opt/bitwarden/restore.sh`
+
+### 监控与维护
+```bash
+# 查看资源使用
+docker stats
+
+# 清理Docker缓存
+docker system prune -f
+
+# 检查磁盘空间
+df -h /opt/bitwarden
+```
+
+## 📁 目录结构
+```
+/opt/bitwarden/
+├── data/                 # Vaultwarden数据目录
+├── backups/              # 本地备份文件
+├── caddy_data/          # Caddy证书和数据
+├── caddy_config/        # Caddy配置
+├── config/              # 配置文件
+│   ├── Caddyfile        # Caddy配置文件
+│   └── vaultwarden.env  # Vaultwarden环境变量
+├── docker-compose.yml   # Docker Compose配置
+├── config.env           # 主配置文件
+├── backup.sh           # 备份脚本
+├── restore.sh          # 恢复脚本
+└── manage.sh           # 管理脚本
+```
+
+## 🔒 安全建议
+
+### 1. 防火墙配置
+```bash
+# 只开放必要端口
+sudo ufw allow 80/tcp
+sudo ufw allow 443/tcp
+sudo ufw enable
+```
+
+### 2. 定期更新
+```bash
+# 每周检查更新
+docker-compose pull
+```
+
+### 3. 监控访问日志
+```bash
+# 查看异常访问
+tail -f /opt/bitwarden/caddy_data/access.log | grep -v "200\|304"
+```
+
+### 4. 强密码策略
+- 使用复杂的管理员令牌
+- 启用两步验证
+- 定期更换密码
+
+## 🌐 网络配置
+
+### IPv4服务器
+- 确保80/443端口对外开放
+- 域名A记录指向服务器IPv4地址
+- 防火墙允许HTTP/HTTPS流量
+
+### IPv6服务器
+- 确保IPv6地址正确配置
+- 域名AAAA记录指向服务器IPv6地址
+- 关闭Cloudflare代理（使用灰色云）
+- 防火墙允许IPv6 HTTP/HTTPS流量
+
+### Cloudflare用户
+- **IPv4服务器**: 可开启代理（橙色云）
+- **IPv6服务器**: 必须关闭代理（灰色云）
+- 确保SSL/TLS设置为"完全"或"严格"
+
+## 🤝 贡献与支持
+
+### 报告问题
+1. 检查现有Issue是否已解决
+2. 提供详细的错误信息
+3. 包含相关日志和配置
+
+### 功能请求
+1. 描述具体需求
+2. 说明使用场景
+3. 提供相关参考资料
+
+### 开发贡献
+1. Fork仓库
+2. 创建功能分支
+3. 提交Pull Request
+
+## 📄 许可证
+
+本项目基于MIT许可证开源。详见 [LICENSE](LICENSE) 文件。
+
+## 🙏 致谢
+
+- [Vaultwarden](https://github.com/dani-garcia/vaultwarden) - 轻量级Bitwarden服务器
+- [Caddy](https://caddyserver.com/) - 现代化的Web服务器
+- [Docker](https://www.docker.com/) - 容器化平台
+- [Cloudflare R2](https://www.cloudflare.com/products/r2/) - 对象存储服务
+
+## 📞 联系方式
+
+如有问题或建议，请通过以下方式联系：
+- GitHub Issues: [项目Issues页面](https://github.com/your-repo/bitwarden-installer/issues)
+- 电子邮件: your-email@example.com
 
 ---
 
-## 🎮 使用流程演示
+**⚠️ 免责声明**: 本脚本仅供学习和研究使用，作者不对使用本脚本造成的任何数据丢失或安全问题负责。在生产环境使用前，请充分测试并备份重要数据。
 
-### 🖥️ 脚本运行全过程（文本模拟）
-
-启动脚本后，您将看到如下交互式菜单：
-
-```
-========================================
-   🔐 Bitwarden 一键部署（加密容灾版）
-========================================
-
-当前系统: Ubuntu 22.04.4 LTS (ID: ubuntu)
-
-请选择模式：
-0) 🚪 退出脚本
-1) 💾 初次部署
-2) 🔄 从 R2 恢复数据
-3) 🖱️ 立即手动执行一次加密备份
-4) 🔁 更新脚本至最新版
-5) 📢 测试通知功能（Telegram / 邮箱）
-6) 🔍 查看最近备份文件
-选择 (0~6): 1
-```
-
-#### ➤ 输入域名和邮箱
-
-```
-🔹 域名 (如 vault.example.com): vault.mydomain.com
-🔹 管理员邮箱 (Let's Encrypt 使用): admin@mydomain.com
-```
-
-#### ➤ 选择反向代理模式
-
-```
-请选择反向代理模式：
-1) 自动检测（推荐：优先 IPv6 → IPv4 → 127.0.0.1）
-2) 强制使用 IPv4
-3) 强制使用 IPv6
-4) 使用本地回环 127.0.0.1
-请输入选项 [1-4] (默认为 1): 
-```
-
-> ✅ 推荐保持默认，自动识别最佳网络路径
-
-#### ➤ 配置第一个 CF R2 账号
-
-```
-🔐 配置第一个 Cloudflare 账号
-🔹 CF 账号1 Account ID: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-🔹 CF 账号1 Access Key: ********************************
-🔹 CF 账号1 Secret Key: ******************************************************
-🔹 CF 账号1 Bucket 名称: bitwarden-primary
-```
-
-#### ➤ 配置第二个 CF R2 账号（容灾）
-
-```
-🔐 配置第二个 Cloudflare 账号
-🔹 CF 账号2 Account ID: yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
-🔹 CF 账号2 Access Key: ********************************
-🔹 CF 账号2 Secret Key: ******************************************************
-🔹 CF 账号2 Bucket 名称: bitwarden-secondary
-```
-
-#### ➤ 设置加密密码（关键！）
-
-```
-🔹 为备份设置加密密码（用于 GPG 加密）: ************
-```
-
-> 🔑 此密码不会被记录，请务必牢记！恢复时必须输入相同密码。
-
-#### ➤ 选择通知方式
-
-```
-❓ 启用 Telegram 通知？(y/N): y
-🔹 Bot Token: 1234567890:AAHxyz...
-🔹 Chat ID: -1001234567890
-
-❓ 启用邮件通知？(y/N): N
-```
-
-#### ➤ 确认配置
-
-```
-❓ 确认使用以上配置？(y/N): y
-```
-
----
-
-### 🚀 部署完成提示
-
-```
-==================================================
-✅ 部署完成！
-🌐 访问: https://vault.mydomain.com
-🛠️  管理: https://vault.mydomain.com/admin
-🔑 Token: a1B2c3D4e5F6g7H8i9J0kLmNoPqRsTuVwXyZ==
-📁 数据目录: /opt/bitwarden/data
-📝 日志: /var/log/bitwarden-setup.log
-🔐 双 R2 备份: bitwarden-primary (账号1), bitwarden-secondary (账号2)
-🔒 加密算法: GPG + AES256
-⏰ 自动备份: 每日凌晨 2:00
-🧼 自动清理: R2 >15天（最少保留1个），本地 >7天
-💡 重要：加密密码已保存，恢复时需手动输入
-==================================================
-```
-
-🎉 同时您会收到一条 Telegram 通知：
-
-> 🚀 Bitwarden 部署完成  
-> 📍 vault.mydomain.com  
-> 🔐 查看 Token: cat /opt/bitwarden/admin_token
-
----
-
-## 🧰 功能详解
-
-### ✅ `bd` 快捷命令（部署后可用）
-
-| 命令 | 功能 |
-|------|------|
-| `bd` | 打开主菜单 |
-| `bd` → `3` | 立即手动备份 |
-| `bd` → `5` | 测试通知是否正常 |
-| `bd` → `6` | 查看本地和云端最近备份 |
-
-### ✅ 自动备份脚本
-
-路径：`/usr/local/bin/bitwarden-backup.sh`  
-日志：`/var/log/bitwarden-backup.log`
-
-每天凌晨执行：
-1. 打包 `/opt/bitwarden/data`
-2. 使用 GPG 密码加密
-3. 上传至两个 R2 存储桶
-4. 删除超过 15 天的远程备份（至少保留 1 个）
-5. 删除超过 7 天的本地备份
-
-### ✅ 如何恢复数据？
-
-1. 运行 `bd`
-2. 选择 `2) 从 R2 恢复数据`
-3. 输入相同的 **GPG 加密密码**
-4. 脚本自动下载、解密、还原
-
----
-
-## 🔐 安全策略
-
-| 环节 | 保护措施 |
-|------|----------|
-| 传输 | HTTPS + Let's Encrypt |
-| 存储 | GPG AES256 加密 `.tar.gz.gpg` 文件 |
-| 备份 | 双 R2 账号异地冗余 |
-| 清理 | 自动删除陈旧备份，防止堆积 |
-| 权限 | 所有敏感文件权限设为 `600` |
-
-> ⚠️ **警告**：忘记加密密码 = 无法恢复数据！
-
----
-
-## ❗ 注意事项
-
-- 请确保服务器开放 **端口 80 和 443**
-- 域名需正确解析到本机 IP（支持 IPv4/IPv6）
-- 推荐使用非 root 用户配合 `sudo`，但脚本需以 `root` 运行
-- 不要随意删除 `/opt/bitwarden/` 目录
-- 若更换服务器，请先通过 `bd` → `2` 恢复数据
-
----
-
-## 🤝 反馈与贡献
-
-欢迎提交 Issue 或 Pull Request！
-
-如果您觉得这个项目对您有帮助，不妨给个 ⭐ Star 支持一下 ❤️
-
-👉 [GitHub 仓库地址](https://github.com/sikiyz/bitwarden-auto)
-
----
-
-## 📜 许可证
-
-MIT License © 2025 sikiyz
-```
+**🔄 最后更新**: 2024年1月21日  
+**🔗 项目地址**: https://github.com/your-repo/bitwarden-installer
