@@ -39,13 +39,13 @@
 
 ### 1. 下载脚本
 ```bash
-wget -O install-bitwarden.sh https://raw.githubusercontent.com/your-repo/bitwarden-installer/main/install.sh
-chmod +x install-bitwarden.sh
+curl -L -o setup.sh https://raw.githubusercontent.com/sikiyz/bitwarden-auto/main/setup.sh
+chmod +x setup.sh
 ```
 
 ### 2. 运行安装
 ```bash
-./install-bitwarden.sh
+./setup.sh
 ```
 
 ### 3. 按照向导配置
@@ -322,12 +322,12 @@ tail -f /opt/bitwarden/caddy_data/access.log | grep -v "200\|304"
 ## 📞 联系方式
 
 如有问题或建议，请通过以下方式联系：
-- GitHub Issues: [项目Issues页面](https://github.com/your-repo/bitwarden-installer/issues)
-- 电子邮件: your-email@example.com
+- GitHub Issues: [项目Issues页面](https://github.com/sikiyz/bitwarden-auto/issues)
+- telegram : [TG联系✈️](https://t.me/sikichat_bot) 
 
 ---
 
 **⚠️ 免责声明**: 本脚本仅供学习和研究使用，作者不对使用本脚本造成的任何数据丢失或安全问题负责。在生产环境使用前，请充分测试并备份重要数据。
 
 **🔄 最后更新**: 2024年1月21日  
-**🔗 项目地址**: https://github.com/your-repo/bitwarden-installer
+**🔗 项目地址**: [https://github.com/sikiyz/bitwarden-auto](https://github.com/sikiyz/bitwarden-auto)
