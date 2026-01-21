@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Bitwarden一键安装脚本 - 修复版
+# Bitwarden一键安装脚本 - 修复版（IPv6兼容）
 set -e
 
 # 颜色定义
@@ -233,8 +233,82 @@ services:
       - vaultwarden
 DOCKER_EOF
     
-    # Caddyfile - 使用自动SSL
-    cat > /opt/bitwarden/config/Caddyfile << CADDY_EOF
+    # ==========================================
+    # 关键修复：根据IP版本创建不同的Caddyfile
+    # ==========================================
+    log "创建Caddy配置（IPv6兼容版）..."
+    
+    if [ "$IP_VERSION" = "ipv6" ]; then
+        log "检测到IPv6选择，应用IPv6优化配置..."
+        # IPv6优化配置（修复了ipv6://协议问题）
+        cat > /opt/bitwarden/config/Caddyfile << IPV6_CADDY_EOF
+{
+    email $EMAIL
+    admin off
+}
+
+# HTTP自动重定向到HTTPS（IPv6兼容）
+$DOMAIN:$HTTP_PORT {
+    bind [::]:$HTTP_PORT
+    redir https://{host}{uri} permanent
+}
+
+# HTTPS主站点（IPv6兼容）
+$DOMAIN:$HTTPS_PORT {
+    bind [::]:$HTTPS_PORT
+    encode gzip
+    
+    # IPv6优化配置 - 直接使用容器名，Caddy会自动处理
+    reverse_proxy vaultwarden:80 {
+        header_up Host {host}
+        header_up X-Real-IP {remote}
+        header_up X-Forwarded-For {remote}
+        header_up X-Forwarded-Proto {scheme}
+    }
+    
+    # WebSocket支持（实时通知）
+    handle_path /notifications/hub {
+        reverse_proxy vaultwarden:3012 {
+            header_up Host {host}
+            header_up X-Real-IP {remote}
+            header_up X-Forwarded-For {remote}
+            header_up X-Forwarded-Proto {scheme}
+            header_up Upgrade {http.upgrade}
+            header_up Connection {http.request.header.Connection}
+        }
+    }
+    
+    handle_path /notifications/hub/negotiate {
+        reverse_proxy vaultwarden:80 {
+            header_up Host {host}
+            header_up X-Real-IP {remote}
+            header_up X-Forwarded-For {remote}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+    
+    # 安全头
+    header {
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+        X-XSS-Protection "1; mode=block"
+        -Server
+    }
+    
+    # 日志
+    log {
+        output file /data/access.log {
+            roll_size 10mb
+            roll_keep 10
+        }
+    }
+}
+IPV6_CADDY_EOF
+        success "IPv6优化配置已创建"
+    else
+        log "使用标准IPv4配置..."
+        # 标准IPv4配置
+        cat > /opt/bitwarden/config/Caddyfile << IPV4_CADDY_EOF
 {
     email $EMAIL
     admin off
@@ -251,8 +325,8 @@ DOCKER_EOF
     bind 0.0.0.0
     encode gzip
     
-    # 根据IP版本配置
-    reverse_proxy $IP_VERSION://vaultwarden:80 {
+    # IPv4配置
+    reverse_proxy vaultwarden:80 {
         header_up Host {host}
         header_up X-Real-IP {remote}
         header_up X-Forwarded-For {remote}
@@ -275,7 +349,9 @@ DOCKER_EOF
         }
     }
 }
-CADDY_EOF
+IPV4_CADDY_EOF
+        success "标准IPv4配置已创建"
+    fi
     
     # Vaultwarden环境文件
     cat > /opt/bitwarden/config/vaultwarden.env << VAULTWARDEN_EOF
@@ -449,9 +525,11 @@ show_menu() {
     echo "7) 测试通知"
     echo "8) 更新服务"
     echo "9) 卸载服务"
-    echo "10) 退出"
+    echo "10) IPv6诊断"
+    echo "11) 退出"
     echo ""
 }
+
 test_notification() {
     source /opt/bitwarden/config.env 2>/dev/null || {
         echo "配置文件不存在"
@@ -491,6 +569,50 @@ test_notification() {
     esac
 }
 
+# IPv6诊断功能
+ipv6_diagnose() {
+    echo "=== IPv6连接诊断 ==="
+    echo ""
+    
+    # 加载配置
+    if [[ -f "/opt/bitwarden/config.env" ]]; then
+        source /opt/bitwarden/config.env 2>/dev/null || true
+    fi
+    
+    echo "1. 系统IPv6信息:"
+    echo "   IPv6地址: $(ip -6 addr show | grep inet6 | grep global | head -1 | awk '{print $2}' | cut -d'/' -f1 2>/dev/null || echo '未检测到')"
+    echo ""
+    
+    echo "2. 服务状态:"
+    cd /opt/bitwarden 2>/dev/null && docker-compose ps 2>/dev/null || echo "服务未运行"
+    echo ""
+    
+    echo "3. 端口监听:"
+    echo "   HTTP端口 ($HTTP_PORT): $(netstat -tln | grep ":$HTTP_PORT " || echo '未监听')"
+    echo "   HTTPS端口 ($HTTPS_PORT): $(netstat -tln | grep ":$HTTPS_PORT " || echo '未监听')"
+    echo "   IPv6 HTTPS端口: $(netstat -tln6 | grep ":$HTTPS_PORT " || echo '未监听')"
+    echo ""
+    
+    echo "4. DNS解析测试:"
+    nslookup $DOMAIN 2>&1 | grep -A2 "Address:"
+    echo ""
+    
+    echo "5. 连接测试:"
+    echo "   HTTP测试: $(curl -s -o /dev/null -w "%{http_code}" -I http://$DOMAIN:$HTTP_PORT 2>/dev/null || echo '失败')"
+    echo "   HTTPS测试: $(curl -s -k -o /dev/null -w "%{http_code}" -I https://$DOMAIN:$HTTPS_PORT 2>/dev/null || echo '失败')"
+    echo "   IPv6 HTTPS测试: $(curl -6 -s -k -o /dev/null -w "%{http_code}" -I https://$DOMAIN:$HTTPS_PORT 2>/dev/null || echo '失败')"
+    echo ""
+    
+    if [[ "$IP_VERSION" == "ipv6" ]]; then
+        echo "6. IPv6专用建议:"
+        echo "   • 确保域名正确解析到IPv6地址"
+        echo "   • 检查防火墙是否开放IPv6端口"
+        echo "   • 如果使用Cloudflare，请关闭代理（灰色云）"
+        echo "   • 运行: curl -6 -v -k https://$DOMAIN:$HTTPS_PORT 查看详细错误"
+    fi
+    echo ""
+}
+
 uninstall_service() {
     echo "⚠️  警告：这将删除所有数据！"
     read -p "确认卸载？(输入yes继续): " confirm
@@ -506,7 +628,7 @@ uninstall_service() {
 
 while true; do
     show_menu
-    read -p "请选择 (1-10): " choice
+    read -p "请选择 (1-11): " choice
     
     case $choice in
         1) 
@@ -571,6 +693,9 @@ while true; do
             uninstall_service
             ;;
         10)
+            ipv6_diagnose
+            ;;
+        11)
             echo "再见！"
             exit 0
             ;;
@@ -683,6 +808,7 @@ echo "- Vaultwarden: ${VAULTWARDEN_PORT:-8080}"
 echo "- WebSocket: ${WEBSOCKET_PORT:-3012}"
 echo "- HTTP: ${HTTP_PORT:-80}"
 echo "- HTTPS: ${HTTPS_PORT:-443}"
+echo "- IP版本: ${IP_VERSION:-ipv4}"
 RESTORE_EOF
     
     chmod +x /opt/bitwarden/restore.sh
@@ -737,7 +863,16 @@ show_completion() {
     echo "• WebSocket端口: ${WEBSOCKET_PORT:-3012}"
     echo "• HTTP端口: ${HTTP_PORT:-80}"
     echo "• HTTPS端口: ${HTTPS_PORT:-443}"
+    echo "• IP版本: ${IP_VERSION:-ipv4}"
     echo ""
+    
+    if [ "$IP_VERSION" = "ipv6" ]; then
+        echo "🔧 IPv6配置已启用:"
+        echo "• 已应用IPv6优化配置"
+        echo "• 支持IPv6直接访问"
+        echo "• 如需诊断IPv6连接，请在管理面板选择'IPv6诊断'"
+        echo ""
+    fi
     
     echo "🔧 管理命令:"
     echo "• bw-manage              - 管理面板"
@@ -767,6 +902,10 @@ show_completion() {
     echo "2. 请妥善保存管理令牌"
     echo "3. 建议立即测试备份功能"
     echo "4. 如果使用非标准端口，请确保防火墙已开放相应端口"
+    if [ "$IP_VERSION" = "ipv6" ]; then
+        echo "5. IPv6用户请确保域名正确解析到IPv6地址"
+        echo "6. 如果使用Cloudflare，请关闭代理（灰色云）"
+    fi
     echo ""
     
     echo "运行 'bw-manage' 开始管理您的Bitwarden服务"
@@ -777,6 +916,7 @@ main_install() {
     clear
     echo "========================================"
     echo "    Bitwarden一键安装脚本"
+    echo "          IPv6兼容版本"
     echo "========================================"
     echo ""
     
@@ -858,15 +998,17 @@ main_menu() {
         clear
         echo "========================================"
         echo "    Bitwarden部署工具"
+        echo "          IPv6兼容版本"
         echo "========================================"
         echo ""
         echo "请选择模式:"
         echo "1) 全新安装"
         echo "2) 恢复安装"
-        echo "3) 退出"
+        echo "3) IPv6快速修复"
+        echo "4) 退出"
         echo ""
         
-        read -p "请选择 (1-3): " mode
+        read -p "请选择 (1-4): " mode
         
         case $mode in
             1)
@@ -878,6 +1020,10 @@ main_menu() {
                 break
                 ;;
             3)
+                ipv6_quick_fix
+                break
+                ;;
+            4)
                 echo "再见！"
                 exit 0
                 ;;
@@ -889,11 +1035,136 @@ main_menu() {
     done
 }
 
+# IPv6快速修复功能
+ipv6_quick_fix() {
+    echo "=== IPv6快速修复 ==="
+    echo ""
+    
+    # 检查是否在bitwarden目录
+    if [[ ! -f "/opt/bitwarden/docker-compose.yml" ]]; then
+        echo "未找到Bitwarden安装目录"
+        echo "请先运行全新安装"
+        exit 1
+    fi
+    
+    cd /opt/bitwarden
+    
+    # 检查当前配置
+    if [[ -f "config.env" ]]; then
+        source config.env 2>/dev/null || true
+    fi
+    
+    echo "当前配置:"
+    echo "• 域名: ${DOMAIN:-未设置}"
+    echo "• IP版本: ${IP_VERSION:-ipv4}"
+    echo "• HTTP端口: ${HTTP_PORT:-80}"
+    echo "• HTTPS端口: ${HTTPS_PORT:-443}"
+    echo ""
+    
+    read -p "是否将IP版本改为IPv6？(y/n): " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        echo "取消修复"
+        return
+    fi
+    
+    # 备份原配置
+    BACKUP_DIR="backup_ipv6_fix_$(date +%Y%m%d_%H%M%S)"
+    mkdir -p "$BACKUP_DIR"
+    cp config/Caddyfile "$BACKUP_DIR/" 2>/dev/null || true
+    cp config.env "$BACKUP_DIR/" 2>/dev/null || true
+    
+    # 更新配置
+    sed -i 's/IP_VERSION=".*"/IP_VERSION="ipv6"/' config.env 2>/dev/null || \
+        echo 'IP_VERSION="ipv6"' >> config.env
+    
+    # 停止服务
+    echo "停止服务..."
+    docker-compose down 2>/dev/null || true
+    
+    # 创建IPv6优化的Caddyfile
+    echo "创建IPv6优化配置..."
+    cat > config/Caddyfile << IPV6_FIX_EOF
+{
+    email ${EMAIL:-admin@example.com}
+    admin off
+}
+
+# HTTP自动重定向到HTTPS（IPv6兼容）
+${DOMAIN:-bitwarden.example.com}:${HTTP_PORT:-80} {
+    bind [::]:${HTTP_PORT:-80}
+    redir https://{host}{uri} permanent
+}
+
+# HTTPS主站点（IPv6兼容）
+${DOMAIN:-bitwarden.example.com}:${HTTPS_PORT:-443} {
+    bind [::]:${HTTPS_PORT:-443}
+    encode gzip
+    
+    # IPv6优化配置
+    reverse_proxy vaultwarden:80 {
+        header_up Host {host}
+        header_up X-Real-IP {remote}
+        header_up X-Forwarded-For {remote}
+        header_up X-Forwarded-Proto {scheme}
+    }
+    
+    # WebSocket支持
+    handle_path /notifications/hub {
+        reverse_proxy vaultwarden:3012 {
+            header_up Host {host}
+            header_up X-Real-IP {remote}
+            header_up X-Forwarded-For {remote}
+            header_up X-Forwarded-Proto {scheme}
+            header_up Upgrade {http.upgrade}
+            header_up Connection {http.request.header.Connection}
+        }
+    }
+    
+    handle_path /notifications/hub/negotiate {
+        reverse_proxy vaultwarden:80 {
+            header_up Host {host}
+            header_up X-Real-IP {remote}
+            header_up X-Forwarded-For {remote}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+    
+    # 安全头
+    header {
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+        X-XSS-Protection "1; mode=block"
+        -Server
+    }
+}
+IPV6_FIX_EOF
+    
+    # 启动服务
+    echo "启动服务..."
+    docker-compose up -d
+    
+    echo ""
+    echo "✅ IPv6修复完成！"
+    echo ""
+    echo "配置已备份到: $BACKUP_DIR"
+    echo "IP版本已改为: ipv6"
+    echo ""
+    echo "测试命令:"
+    echo "1. 检查服务状态: docker-compose ps"
+    echo "2. 查看Caddy日志: docker-compose logs caddy --tail=20"
+    echo "3. 测试IPv6访问: curl -6 -k -I https://${DOMAIN:-你的域名}:${HTTPS_PORT:-443}"
+    echo ""
+    echo "如果仍有问题，请运行: bw-manage 然后选择'IPv6诊断'"
+}
+
 # 直接运行安装
 if [[ "$1" == "--install" ]]; then
     main_install
 elif [[ "$1" == "--restore" ]]; then
     restore_mode
+elif [[ "$1" == "--fix-ipv6" ]]; then
+    ipv6_quick_fix
 else
     main_menu
 fi
