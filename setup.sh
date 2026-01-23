@@ -1454,9 +1454,6 @@ ipv6_quick_fix() {
     echo "停止服务..."
     docker-compose down 2>/dev/null || true
     
-    # 创建IPv6优化的
-
-```bash
     # 创建IPv6优化的Caddyfile（修复TLS问题）
     echo "创建IPv6优化配置..."
     cat > config/Caddyfile << IPV6_FIX_EOF
