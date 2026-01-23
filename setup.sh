@@ -1258,8 +1258,6 @@ show_completion() {
     echo "• 备份到Cloudflare Worker (R2存储)"
     echo "• 本地保留7天备份"
     echo ""
-    
-    ```bash
     echo "🔔 通知方式: ${NOTIFICATION_TYPE:-未设置}"
     echo ""
     
