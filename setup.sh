@@ -942,6 +942,7 @@ ipv6_diagnose() {
     echo "4. DNS解析测试:"
     nslookup $DOMAIN 2>&1 | grep -A2 "Address:"
     echo ""
+    
 
     echo "5. 连接测试:"
     echo "   HTTP测试: $(curl -s -o /dev/null -w "%{http_code}" -I http://$DOMAIN:$HTTP_PORT 2>/dev/null || echo '失败')"
@@ -1454,6 +1455,7 @@ ipv6_quick_fix() {
     echo "停止服务..."
     docker-compose down 2>/dev/null || true
     
+
     # 创建IPv6优化的Caddyfile（修复TLS问题）
     echo "创建IPv6优化配置..."
     cat > config/Caddyfile << IPV6_FIX_EOF
