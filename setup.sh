@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Bitwarden一键安装脚本 - 修复版（IPv6兼容）
+# Bitwarden一键安装脚本 - Worker备份版（IPv6兼容）
 set -e
 
 # 颜色定义
@@ -35,7 +35,7 @@ fix_system() {
 install_dependencies() {
     log "安装系统依赖..."
     apt-get update
-    apt-get install -y curl wget jq openssl cron
+    apt-get install -y curl wget jq openssl cron sqlite3
 }
 
 # 安装Docker
@@ -134,22 +134,23 @@ get_config() {
         *) NOTIFICATION_TYPE="none" ;;
     esac
     
-    # Cloudflare R2配置
+    # ============================================
+    # Worker备份配置（新）
+    # ============================================
     echo ""
-    echo "=== Cloudflare R2备份配置 ==="
-    echo "第一个R2账户 (必填):"
-    read -p "Account ID: " CF_ACCOUNT_ID_1
-    read -p "Access Key ID: " CF_R2_ACCESS_KEY_1
-    read -p "Secret Access Key: " CF_R2_SECRET_KEY_1
-    read -p "Bucket名称: " CF_R2_BUCKET_1
+    echo "=== Cloudflare Worker备份配置 ==="
+    echo "Worker方案更安全，使用预签名URL上传到R2"
+    echo ""
+    
+    echo "第一个Worker（必需）:"
+    read -p "Worker URL [例如: https://bitwarden-backup1.workers.dev]: " WORKER_URL_1
+    read -p "Worker API Token: " WORKER_TOKEN_1
     
     echo ""
-    echo "第二个R2账户 (可选，留空跳过):"
-    read -p "Account ID: " CF_ACCOUNT_ID_2
-    if [[ -n "$CF_ACCOUNT_ID_2" ]]; then
-        read -p "Access Key ID: " CF_R2_ACCESS_KEY_2
-        read -p "Secret Access Key: " CF_R2_SECRET_KEY_2
-        read -p "Bucket名称: " CF_R2_BUCKET_2
+    echo "第二个Worker（可选，用于备份到另一个账号）:"
+    read -p "Worker URL [留空跳过]: " WORKER_URL_2
+    if [[ -n "$WORKER_URL_2" ]]; then
+        read -p "Worker API Token: " WORKER_TOKEN_2
     fi
     
     # 生成密钥
@@ -160,7 +161,7 @@ get_config() {
 # 创建目录结构
 create_directories() {
     log "创建目录结构..."
-    mkdir -p /opt/bitwarden/{data,backups,config}
+    mkdir -p /opt/bitwarden/{data,backups,config,scripts}
 }
 
 # 创建配置文件
@@ -180,16 +181,15 @@ NOTIFICATION_TYPE="$NOTIFICATION_TYPE"
 TELEGRAM_BOT_TOKEN="$TELEGRAM_BOT_TOKEN"
 TELEGRAM_CHAT_ID="$TELEGRAM_CHAT_ID"
 EMAIL_TO="$EMAIL_TO"
-CF_ACCOUNT_ID_1="$CF_ACCOUNT_ID_1"
-CF_R2_ACCESS_KEY_1="$CF_R2_ACCESS_KEY_1"
-CF_R2_SECRET_KEY_1="$CF_R2_SECRET_KEY_1"
-CF_R2_BUCKET_1="$CF_R2_BUCKET_1"
-CF_ACCOUNT_ID_2="$CF_ACCOUNT_ID_2"
-CF_R2_ACCESS_KEY_2="$CF_R2_ACCESS_KEY_2"
-CF_R2_SECRET_KEY_2="$CF_R2_SECRET_KEY_2"
-CF_R2_BUCKET_2="$CF_R2_BUCKET_2"
+WORKER_URL_1="$WORKER_URL_1"
+WORKER_TOKEN_1="$WORKER_TOKEN_1"
+WORKER_URL_2="$WORKER_URL_2"
+WORKER_TOKEN_2="$WORKER_TOKEN_2"
 BACKUP_ENCRYPTION_KEY="$BACKUP_ENCRYPTION_KEY"
 ADMIN_TOKEN="$ADMIN_TOKEN"
+CONTAINER_NAME="vaultwarden"
+BACKUP_DIR="/opt/bitwarden/backups"
+RETENTION_DAYS=7
 CONFIG_EOF
     
     # docker-compose.yml - 使用Caddy自动SSL
@@ -368,27 +368,46 @@ VAULTWARDEN_EOF
     chmod 600 /opt/bitwarden/config.env
 }
 
-# 创建备份脚本
-create_backup_script() {
-    log "创建备份脚本..."
+# ============================================
+# 创建Worker备份脚本（新）
+# ============================================
+create_worker_backup_script() {
+    log "创建Worker备份脚本..."
     
-    cat > /opt/bitwarden/backup.sh << 'BACKUP_EOF'
+    cat > /opt/bitwarden/scripts/backup_to_workers.sh << 'BACKUP_WORKER_EOF'
 #!/bin/bash
 set -e
 
-# 加载配置
-source /opt/bitwarden/config.env
+# ============================================
+#    Bitwarden双Worker备份脚本
+# ============================================
 
-# 变量
-TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
-BACKUP_NAME="bitwarden_backup_$TIMESTAMP"
-BACKUP_FILE="/opt/bitwarden/backups/$BACKUP_NAME.tar.gz"
-ENCRYPTED_FILE="$BACKUP_FILE.enc"
-LOG_FILE="/var/log/bitwarden_backup.log"
+# 加载配置
+CONFIG_FILE="/opt/bitwarden/config.env"
+if [[ ! -f "$CONFIG_FILE" ]]; then
+    echo "配置文件不存在: $CONFIG_FILE"
+    exit 1
+fi
+source "$CONFIG_FILE"
+
+# 颜色
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
 
 # 日志
 log() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
+    echo -e "${BLUE}[$(date '+%Y-%m-%d %H:%M:%S')]${NC} $1"
+}
+
+error() {
+    echo -e "${RED}[ERROR]${NC} $1" >&2
+}
+
+success() {
+    echo -e "${GREEN}[SUCCESS]${NC} $1"
 }
 
 # 发送通知
@@ -400,7 +419,7 @@ send_notification() {
             curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
                 -d chat_id="$TELEGRAM_CHAT_ID" \
                 -d text="$message" \
-                -d parse_mode="Markdown" > /dev/null 2>&1
+                -d parse_mode="Markdown" > /dev/null 2>&1 || true
             ;;
         "email")
             echo "$message" | mail -s "Bitwarden备份通知" "$EMAIL_TO" 2>/dev/null || true
@@ -409,101 +428,540 @@ send_notification() {
             curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
                 -d chat_id="$TELEGRAM_CHAT_ID" \
                 -d text="$message" \
-                -d parse_mode="Markdown" > /dev/null 2>&1
+                -d parse_mode="Markdown" > /dev/null 2>&1 || true
             echo "$message" | mail -s "Bitwarden备份通知" "$EMAIL_TO" 2>/dev/null || true
             ;;
     esac
 }
 
-# 加密
-encrypt() {
-    openssl enc -aes-256-cbc -salt -in "$1" -out "$2" \
-        -pass pass:"$BACKUP_ENCRYPTION_KEY" 2>/dev/null
-}
-
-# 上传到R2
-upload_r2() {
-    local file="$1" account_id="$2" access_key="$3" secret_key="$4" bucket="$5"
-    [[ -z "$account_id" ]] && return 1
+# 检查Worker状态
+check_worker() {
+    local worker_url="$1"
+    local api_token="$2"
+    local description="$3"
     
-    local endpoint="https://$account_id.r2.cloudflarestorage.com"
-    local filename=$(basename "$file")
+    log "检查 $description..."
     
-    curl -X PUT "$endpoint/$bucket/$filename" \
-        -H "Authorization: Bearer $access_key" \
-        -H "Content-Type: application/octet-stream" \
-        --data-binary @"$file" \
-        --silent --show-error 2>&1
-    return $?
-}
-
-# 主备份
-main() {
-    log "开始备份..."
+    local response=$(curl -s -w "%{http_code}" "${worker_url}/health" 2>/dev/null)
+    local http_code="${response: -3}"
+    local response_body="${response%???}"
     
-    cd /opt/bitwarden
-    docker-compose stop vaultwarden
-    sleep 3
-    
-    # 创建备份
-    tar -czf "$BACKUP_FILE" data config docker-compose.yml config.env
-    
-    # 加密
-    if encrypt "$BACKUP_FILE" "$ENCRYPTED_FILE"; then
-        rm -f "$BACKUP_FILE"
-        BACKUP_FILE="$ENCRYPTED_FILE"
-        log "备份已加密"
-    fi
-    
-    # 上传结果
-    RESULTS=""
-    
-    # R2账户1
-    if upload_r2 "$BACKUP_FILE" "$CF_ACCOUNT_ID_1" "$CF_R2_ACCESS_KEY_1" \
-        "$CF_R2_SECRET_KEY_1" "$CF_R2_BUCKET_1"; then
-        RESULTS+="✅ R2账户1: 成功\n"
-        log "R2账户1上传成功"
+    if [[ "$http_code" == "200" ]] && echo "$response_body" | grep -q '"status":"ok"'; then
+        success "$description 状态正常"
+        return 0
     else
-        RESULTS+="❌ R2账户1: 失败\n"
-        log "R2账户1上传失败"
+        error "$description 状态异常 (HTTP $http_code)"
+        return 1
+    fi
+}
+
+# 备份数据库
+backup_database() {
+    log "备份数据库..."
+    
+    # 检查容器
+    if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+        error "容器未运行: $CONTAINER_NAME"
+        return 1
     fi
     
-    # R2账户2
-    if [[ -n "$CF_ACCOUNT_ID_2" ]]; then
-        if upload_r2 "$BACKUP_FILE" "$CF_ACCOUNT_ID_2" "$CF_R2_ACCESS_KEY_2" \
-            "$CF_R2_SECRET_KEY_2" "$CF_R2_BUCKET_2"; then
-            RESULTS+="✅ R2账户2: 成功\n"
-            log "R2账户2上传成功"
-        else
-            RESULTS+="❌ R2账户2: 失败\n"
-            log "R2账户2上传失败"
+    # 临时目录
+    local temp_dir="/tmp/db_backup_$(date +%s)"
+    mkdir -p "$temp_dir"
+    
+    # 复制数据库文件
+    if ! docker cp "${CONTAINER_NAME}:/data/db.sqlite3" "${temp_dir}/db.sqlite3"; then
+        error "数据库复制失败"
+        rm -rf "$temp_dir"
+        return 1
+    fi
+    
+    # 验证文件
+    local db_size=$(stat -c%s "${temp_dir}/db.sqlite3" 2>/dev/null || echo "0")
+    if [[ $db_size -lt 1000 ]]; then
+        error "数据库文件太小或为空: $db_size 字节"
+        rm -rf "$temp_dir"
+        return 1
+    fi
+    
+    success "数据库备份完成: $((db_size/1024)) KB"
+    
+    # 复制相关文件
+    docker cp "${CONTAINER_NAME}:/data/db.sqlite3-wal" "${temp_dir}/db.sqlite3-wal" 2>/dev/null
+    docker cp "${CONTAINER_NAME}:/data/db.sqlite3-shm" "${temp_dir}/db.sqlite3-shm" 2>/dev/null
+    
+    echo "$temp_dir"
+}
+
+# 备份附件
+backup_attachments() {
+    log "备份附件..."
+    
+    # 检查容器内附件
+    if docker exec "$CONTAINER_NAME" ls /data/attachments >/dev/null 2>&1; then
+        local temp_dir="/tmp/attachments_$(date +%s)"
+        mkdir -p "$temp_dir"
+        
+        docker cp "${CONTAINER_NAME}:/data/attachments" "${temp_dir}/" 2>/dev/null
+        if [[ -d "${temp_dir}/attachments" ]]; then
+            local count=$(find "${temp_dir}/attachments" -type f 2>/dev/null | wc -l)
+            log "附件复制完成: $count 个文件"
+            echo "$temp_dir"
+            return 0
+        fi
+        rm -rf "$temp_dir"
+    fi
+    
+    # 检查宿主机附件
+    if [[ -d "/opt/bitwarden/attachments" ]]; then
+        local count=$(find "/opt/bitwarden/attachments" -type f 2>/dev/null | wc -l)
+        log "使用宿主机附件目录: $count 个文件"
+        echo "/opt/bitwarden/attachments"
+        return 0
+    fi
+    
+    log "未找到附件"
+    echo ""
+}
+
+# 创建备份包
+create_backup_package() {
+    local db_dir="$1"
+    local attachments_dir="$2"
+    
+    log "创建备份包..."
+    
+    # 创建备份目录
+    mkdir -p "$BACKUP_DIR"
+    
+    # 生成时间戳
+    local timestamp=$(date +"%Y%m%d_%H%M%S")
+    local backup_file="$BACKUP_DIR/bitwarden_backup_${timestamp}.tar.gz"
+    
+    # 临时工作目录
+    local work_dir="/tmp/backup_work_$(date +%s)"
+    mkdir -p "$work_dir"
+    
+    # 复制数据库文件
+    if [[ -d "$db_dir" ]]; then
+        cp -r "$db_dir"/* "$work_dir/" 2>/dev/null
+    fi
+    
+    # 处理附件
+    if [[ -n "$attachments_dir" ]]; then
+        if [[ -d "$attachments_dir" ]]; then
+            tar -czf "$work_dir/attachments.tar.gz" -C "$attachments_dir" . 2>/dev/null
         fi
     fi
     
-    # 启动服务
-    docker-compose start vaultwarden
+    # 添加备份信息
+    cat > "$work_dir/backup_info.txt" << INFO
+备份时间: $(date)
+容器: $CONTAINER_NAME
+数据库版本: $(date -r "$work_dir/db.sqlite3" 2>/dev/null || echo "未知")
+备份类型: 完整备份
+INFO
     
-    # 清理旧备份（保留7天）
-    find /opt/bitwarden/backups -name "*.tar.gz*" -mtime +7 -delete
+    # 创建tar包
+    cd "$work_dir"
+    tar -czf "$backup_file" . 2>/dev/null
     
-    # 发送通知
-    local message="📦 Bitwarden备份完成\n"
-    message+="时间: $TIMESTAMP\n"
-    message+="文件: $(basename $BACKUP_FILE)\n"
-    message+="大小: $(du -h "$BACKUP_FILE" | cut -f1)\n"
-    message+="$RESULTS"
+    # 清理
+    rm -rf "$work_dir" "$db_dir"
+    if [[ "$attachments_dir" != "/opt/bitwarden/attachments" ]] && [[ -d "$attachments_dir" ]]; then
+        rm -rf "$attachments_dir"
+    fi
     
-    send_notification "$message"
-    log "备份完成"
+    # 验证备份包
+    local backup_size=$(stat -c%s "$backup_file" 2>/dev/null || echo "0")
+    if [[ $backup_size -gt 1000 ]]; then
+        success "备份包创建完成: $(basename "$backup_file") ($((backup_size/1024/1024)) MB)"
+        echo "$backup_file"
+    else
+        error "备份包创建失败 (大小: $backup_size 字节)"
+        echo ""
+    fi
 }
 
-main
-BACKUP_EOF
+# 上传到Worker
+upload_to_worker() {
+    local file_path="$1"
+    local worker_url="$2"
+    local api_token="$3"
+    local description="$4"
     
+    if [[ ! -f "$file_path" ]]; then
+        error "文件不存在: $file_path"
+        return 1
+    fi
+    
+    local filename=$(basename "$file_path")
+    local file_size=$(stat -c%s "$file_path")
+    local remote_name="$filename"
+    
+    log "上传到 $description..."
+    log "文件: $filename ($((file_size/1024/1024)) MB)"
+    
+    local response=$(curl -s -w "\n%{http_code}" -X PUT \
+        -H "Authorization: Bearer $api_token" \
+        -H "Content-Type: application/octet-stream" \
+        --data-binary @"$file_path" \
+        "${worker_url}/upload?filename=${remote_name}" 2>&1)
+    
+    local http_code=$(echo "$response" | tail -1)
+    local response_body=$(echo "$response" | sed '$d')
+    
+    if [[ "$http_code" == "200" ]] && echo "$response_body" | grep -q '"success":true'; then
+        success "$description 上传成功"
+        return 0
+    else
+        error "$description 上传失败 (HTTP $http_code)"
+        log "错误响应: $response_body"
+        return 1
+    fi
+}
+
+# 清理旧备份
+cleanup_old_backups() {
+    log "清理超过${RETENTION_DAYS}天的旧备份..."
+    
+    if [[ -d "$BACKUP_DIR" ]]; then
+        local deleted=$(find "$BACKUP_DIR" -name "*.tar.gz" -mtime +$RETENTION_DAYS -delete -print 2>/dev/null | wc -l)
+        log "清理了 $deleted 个旧备份文件"
+    fi
+}
+
+# 主备份函数
+main_backup() {
+    echo "========================================"
+    echo "    Bitwarden双Worker备份"
+    echo "========================================"
+    echo ""
+    
+    # 检查容器
+    if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+        error "容器未运行: $CONTAINER_NAME"
+        return 1
+    fi
+    success "容器运行正常"
+    
+    # 检查Worker
+    local main_worker_ok=0
+    local second_worker_ok=0
+    
+    if [[ -n "$WORKER_URL_1" ]] && [[ -n "$WORKER_TOKEN_1" ]]; then
+        check_worker "$WORKER_URL_1" "$WORKER_TOKEN_1" "主Worker" && main_worker_ok=1
+    else
+        error "主Worker配置不完整"
+    fi
+    
+    if [[ -n "$WORKER_URL_2" ]] && [[ -n "$WORKER_TOKEN_2" ]]; then
+        check_worker "$WORKER_URL_2" "$WORKER_TOKEN_2" "备份Worker" && second_worker_ok=1
+    else
+        log "备份Worker未配置，跳过"
+    fi
+    
+    if [[ $main_worker_ok -eq 0 ]] && [[ $second_worker_ok -eq 0 ]]; then
+        error "所有Worker都不可用"
+        return 1
+    fi
+    
+    # 1. 备份数据库
+    log "步骤1: 备份数据库"
+    local db_dir=$(backup_database)
+    if [[ -z "$db_dir" ]]; then
+        error "数据库备份失败"
+        return 1
+    fi
+    
+    # 2. 备份附件
+    log "步骤2: 备份附件"
+    local attachments_dir=$(backup_attachments)
+    
+    # 3. 创建备份包
+    log "步骤3: 创建备份包"
+    local backup_file=$(create_backup_package "$db_dir" "$attachments_dir")
+    if [[ -z "$backup_file" ]]; then
+        error "备份包创建失败"
+        return 1
+    fi
+    
+    local backup_size=$(stat -c%s "$backup_file")
+    
+    # 4. 上传到Worker
+    log "步骤4: 上传备份"
+    local upload_results=()
+    
+    if [[ $main_worker_ok -eq 1 ]]; then
+        upload_to_worker "$backup_file" "$WORKER_URL_1" "$WORKER_TOKEN_1" "主Worker"
+        upload_results+=($?)
+    fi
+    
+    if [[ $second_worker_ok -eq 1 ]]; then
+        upload_to_worker "$backup_file" "$WORKER_URL_2" "$WORKER_TOKEN_2" "备份Worker"
+        upload_results+=($?)
+    fi
+    
+    # 5. 清理
+    cleanup_old_backups
+    
+    # 检查上传结果
+    local success_count=0
+    for result in "${upload_results[@]}"; do
+        if [[ $result -eq 0 ]]; then
+            ((success_count++))
+        fi
+    done
+    
+    echo ""
+    if [[ $success_count -gt 0 ]]; then
+        success "✅ 备份完成！成功上传到 $success_count 个Worker"
+        
+        # 发送成功通知
+        local message="📦 Bitwarden备份完成\n"
+        message+="时间: $(date '+%Y-%m-%d %H:%M:%S')\n"
+        message+="文件: $(basename "$backup_file")\n"
+        message+="大小: $((backup_size/1024/1024)) MB\n"
+        message+="状态: 成功上传到 $success_count 个Worker\n"
+        message+="本地保留: $RETENTION_DAYS 天"
+        
+        send_notification "$message"
+    else
+        error "❌ 备份创建成功但上传失败"
+        
+        # 发送失败通知
+        local message="❌ Bitwarden备份失败\n"
+        message+="时间: $(date '+%Y-%m-%d %H:%M:%S')\n"
+        message+="错误: 所有Worker上传失败\n"
+        message+="请检查Worker配置和网络连接"
+        
+        send_notification "$message"
+    fi
+    
+    log "本地备份: $backup_file"
+    return $((success_count > 0 ? 0 : 1))
+}
+
+# 列出备份
+list_backups() {
+    echo "=== 本地备份 ==="
+    ls -lh "$BACKUP_DIR"/*.tar.gz 2>/dev/null || echo "暂无备份"
+    
+    echo ""
+    echo "=== Worker备份列表 ==="
+    
+    # 主Worker
+    if [[ -n "$WORKER_URL_1" ]] && [[ -n "$WORKER_TOKEN_1" ]]; then
+        echo "主Worker备份:"
+        curl -s -H "Authorization: Bearer $WORKER_TOKEN_1" "${WORKER_URL_1}/list" 2>/dev/null | \
+            grep -o '"key":"[^"]*"' | cut -d'"' -f4 | grep -i backup | sort
+        echo ""
+    fi
+    
+    # 备份Worker
+    if [[ -n "$WORKER_URL_2" ]] && [[ -n "$WORKER_TOKEN_2" ]]; then
+        echo "备份Worker备份:"
+        curl -s -H "Authorization: Bearer $WORKER_TOKEN_2" "${WORKER_URL_2}/list" 2>/dev/null | \
+            grep -o '"key":"[^"]*"' | cut -d'"' -f4 | grep -i backup | sort
+    fi
+}
+
+# 测试Worker连接
+test_workers() {
+    echo "=== 测试Worker连接 ==="
+    echo ""
+    
+    if [[ -n "$WORKER_URL_1" ]] && [[ -n "$WORKER_TOKEN_1" ]]; then
+        echo "测试主Worker..."
+        check_worker "$WORKER_URL_1" "$WORKER_TOKEN_1" "主Worker"
+        echo ""
+    fi
+    
+    if [[ -n "$WORKER_URL_2" ]] && [[ -n "$WORKER_TOKEN_2" ]]; then
+        echo "测试备份Worker..."
+        check_worker "$WORKER_URL_2" "$WORKER_TOKEN_2" "备份Worker"
+        echo ""
+    fi
+    
+    echo "测试上传小文件..."
+    TEST_FILE="/tmp/test_upload_$(date +%s).txt"
+    echo "Worker测试文件 - $(date)" > "$TEST_FILE"
+    
+    if [[ -n "$WORKER_URL_1" ]] && [[ -n "$WORKER_TOKEN_1" ]]; then
+        echo "上传到主Worker..."
+        upload_to_worker "$TEST_FILE" "$WORKER_URL_1" "$WORKER_TOKEN_1" "主Worker测试"
+        echo ""
+    fi
+    
+    rm -f "$TEST_FILE"
+}
+
+# 主程序
+case "${1:-}" in
+    backup)
+        main_backup
+        ;;
+    list)
+        list_backups
+        ;;
+    test)
+        test_workers
+        ;;
+    *)
+        echo "用法: $0 <命令>"
+        echo ""
+        echo "命令:"
+        echo "  backup    执行备份"
+        echo "  list      列出备份"
+        echo "  test      测试Worker连接"
+        echo ""
+        echo "配置:"
+        echo "  配置文件: /opt/bitwarden/config.env"
+        echo "  备份目录: $BACKUP_DIR"
+        echo "  容器名称: $CONTAINER_NAME"
+        ;;
+esac
+BACKUP_WORKER_EOF
+
+    chmod +x /opt/bitwarden/scripts/backup_to_workers.sh
+    
+    # 创建主备份脚本（兼容旧调用）
+    cat > /opt/bitwarden/backup.sh << 'MAIN_BACKUP_EOF'
+#!/bin/bash
+# 主备份脚本 - 调用Worker备份脚本
+
+/opt/bitwarden/scripts/backup_to_workers.sh backup
+MAIN_BACKUP_EOF
+
     chmod +x /opt/bitwarden/backup.sh
 }
 
-# 创建管理脚本
+# ============================================
+# 创建Worker部署指南
+# ============================================
+create_worker_guide() {
+    log "创建Worker部署指南..."
+    
+    cat > /opt/bitwarden/scripts/deploy_worker.md << 'WORKER_GUIDE'
+# Cloudflare Worker部署指南
+
+## Worker代码
+
+```javascript
+// Bitwarden备份上传Worker
+export default {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    const path = url.pathname;
+    
+    // CORS头
+    const corsHeaders = {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, PUT, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    };
+    
+    // 处理OPTIONS请求
+    if (request.method === 'OPTIONS') {
+      return new Response(null, { headers: corsHeaders });
+    }
+    
+    // 健康检查不需要认证
+    if (path === '/health' && request.method === 'GET') {
+      return new Response(JSON.stringify({
+        status: 'ok',
+        service: 'Bitwarden Backup Worker',
+        timestamp: new Date().toISOString(),
+      }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+    
+    // 其他端点需要认证
+    const authHeader = request.headers.get('Authorization');
+    const API_TOKEN = env.API_TOKEN || 'bitwarden-backup-secret';
+    
+    if (!authHeader || authHeader !== `Bearer ${API_TOKEN}`) {
+      return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+        status: 401,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+    
+    // 直接上传端点
+    if (path === '/upload' && request.method === 'PUT') {
+      try {
+        const filename = url.searchParams.get('filename') || `backup_${Date.now()}.tar.gz`;
+        
+        // 保存到R2
+        await env.BITWARDEN_BUCKET.put(filename, request.body, {
+          httpMetadata: { contentType: 'application/octet-stream' },
+        });
+        
+        return new Response(JSON.stringify({
+          success: true,
+          filename: filename,
+          message: 'File uploaded successfully',
+          size: request.headers.get('Content-Length'),
+          uploaded: new Date().toISOString()
+        }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+        
+      } catch (error) {
+        return new Response(JSON.stringify({ 
+          error: error.message
+        }), {
+          status: 500,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+    }
+    
+    // 列出文件
+    if (path === '/list' && request.method === 'GET') {
+      try {
+        const list = await env.BITWARDEN_BUCKET.list();
+        
+        return new Response(JSON.stringify({
+          success: true,
+          files: list.objects.map(obj => ({
+            key: obj.key,
+            size: obj.size,
+            uploaded: obj.uploaded,
+          })),
+          count: list.objects.length
+        }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+        
+      } catch (error) {
+        return new Response(JSON.stringify({ 
+          error: error.message
+        }), {
+          status: 500,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+    }
+    
+    // 默认响应
+    return new Response(JSON.stringify({
+      message: 'Bitwarden Backup Worker',
+      endpoints: {
+        healthCheck: 'GET /health (无需认证)',
+        upload: 'PUT /upload?filename=xxx (需要认证)',
+        list: 'GET /list (需要认证)',
+      },
+    }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    });
+  },
+};
+
+# ============================================
+# 创建管理脚本（更新版）
+# ============================================
 create_management_script() {
     log "创建管理脚本..."
     
@@ -513,7 +971,7 @@ create_management_script() {
 show_menu() {
     clear
     echo "========================================"
-    echo "    Bitwarden管理面板"
+    echo "    Bitwarden管理面板 - Worker备份版"
     echo "========================================"
     echo ""
     echo "1) 启动服务"
@@ -523,10 +981,13 @@ show_menu() {
     echo "5) 查看日志"
     echo "6) 手动备份"
     echo "7) 测试通知"
-    echo "8) 更新服务"
-    echo "9) 卸载服务"
-    echo "10) IPv6诊断"
-    echo "11) 退出"
+    echo "8) 测试Worker连接"
+    echo "9) 列出备份"
+    echo "10) 更新服务"
+    echo "11) 卸载服务"
+    echo "12) IPv6诊断"
+    echo "13) 查看Worker指南"
+    echo "14) 退出"
     echo ""
 }
 
@@ -628,7 +1089,7 @@ uninstall_service() {
 
 while true; do
     show_menu
-    read -p "请选择 (1-11): " choice
+    read -p "请选择 (1-14): " choice
     
     case $choice in
         1) 
@@ -683,19 +1144,36 @@ while true; do
             test_notification
             ;;
         8)
+            echo "测试Worker连接..."
+            /opt/bitwarden/scripts/backup_to_workers.sh test
+            ;;
+        9)
+            echo "列出备份..."
+            /opt/bitwarden/scripts/backup_to_workers.sh list
+            ;;
+        10)
             cd /opt/bitwarden 2>/dev/null || { echo "目录不存在"; break; }
             docker-compose pull
             docker-compose down
             docker-compose up -d
             echo "服务已更新"
             ;;
-        9)
+        11)
             uninstall_service
             ;;
-        10)
+        12)
             ipv6_diagnose
             ;;
-        11)
+        13)
+            echo "Worker部署指南:"
+            echo "文件位置: /opt/bitwarden/scripts/deploy_worker.md"
+            echo ""
+            echo "快速查看:"
+            head -50 /opt/bitwarden/scripts/deploy_worker.md
+            echo ""
+            echo "... (更多内容请查看完整文件)"
+            ;;
+        14)
             echo "再见！"
             exit 0
             ;;
@@ -715,7 +1193,9 @@ MANAGE_EOF
     ln -sf /opt/bitwarden/manage.sh /usr/local/bin/bw-manage 2>/dev/null || true
 }
 
-# 创建恢复脚本
+# ============================================
+# 创建恢复脚本（更新版）
+# ============================================
 create_restore_script() {
     log "创建恢复脚本..."
     
@@ -733,11 +1213,16 @@ echo ""
 
 # 检查备份
 if [[ ! -d "$BACKUP_DIR" ]] || [[ -z "$(ls -A $BACKUP_DIR/*.tar.gz* 2>/dev/null)" ]]; then
-    echo "没有找到备份文件"
+    echo "没有找到本地备份文件"
+    echo ""
+    echo "你可以从Worker恢复:"
+    echo "1. 运行: bw-manage"
+    echo "2. 选择'列出备份'查看Worker中的备份"
+    echo "3. 手动从Worker下载备份文件到: $BACKUP_DIR"
     exit 1
 fi
 
-echo "可用的备份文件:"
+echo "可用的本地备份文件:"
 ls -lh "$BACKUP_DIR"/*.tar.gz* 2>/dev/null | cat -n
 
 echo ""
@@ -809,6 +1294,10 @@ echo "- WebSocket: ${WEBSOCKET_PORT:-3012}"
 echo "- HTTP: ${HTTP_PORT:-80}"
 echo "- HTTPS: ${HTTPS_PORT:-443}"
 echo "- IP版本: ${IP_VERSION:-ipv4}"
+echo ""
+echo "Worker备份配置:"
+echo "- 主Worker: ${WORKER_URL_1:-未配置}"
+echo "- 备份Worker: ${WORKER_URL_2:-未配置}"
 RESTORE_EOF
     
     chmod +x /opt/bitwarden/restore.sh
@@ -817,7 +1306,7 @@ RESTORE_EOF
 # 设置定时任务
 setup_cron() {
     log "设置定时备份..."
-    echo "0 2 * * * /opt/bitwarden/backup.sh" >> /etc/crontab
+    echo "0 2 * * * /opt/bitwarden/backup.sh >> /var/log/bitwarden_backup.log 2>&1" >> /etc/crontab
     systemctl restart cron 2>/dev/null || true
 }
 
@@ -874,6 +1363,13 @@ show_completion() {
         echo ""
     fi
     
+    echo "🔧 Worker备份配置:"
+    echo "• 主Worker: ${WORKER_URL_1:-未配置}"
+    if [[ -n "$WORKER_URL_2" ]]; then
+        echo "• 备份Worker: $WORKER_URL_2"
+    fi
+    echo ""
+    
     echo "🔧 管理命令:"
     echo "• bw-manage              - 管理面板"
     echo "• /opt/bitwarden/backup.sh  - 手动备份"
@@ -882,10 +1378,11 @@ show_completion() {
     
     echo "📅 自动备份:"
     echo "• 每天凌晨2点自动执行"
-    echo "• 备份到Cloudflare R2"
+    echo "• 备份到Cloudflare Worker (R2存储)"
     echo "• 本地保留7天备份"
     echo ""
     
+    ```bash
     echo "🔔 通知方式: ${NOTIFICATION_TYPE:-未设置}"
     echo ""
     
@@ -900,12 +1397,13 @@ show_completion() {
     echo "⚠️  重要提示:"
     echo "1. 首次访问需要注册管理员账户"
     echo "2. 请妥善保存管理令牌"
-    echo "3. 建议立即测试备份功能"
+    echo "3. 建议立即测试备份功能: bw-manage → 测试Worker连接"
     echo "4. 如果使用非标准端口，请确保防火墙已开放相应端口"
     if [ "$IP_VERSION" = "ipv6" ]; then
         echo "5. IPv6用户请确保域名正确解析到IPv6地址"
         echo "6. 如果使用Cloudflare，请关闭代理（灰色云）"
     fi
+    echo "7. Worker部署指南: /opt/bitwarden/scripts/deploy_worker.md"
     echo ""
     
     echo "运行 'bw-manage' 开始管理您的Bitwarden服务"
@@ -916,7 +1414,7 @@ main_install() {
     clear
     echo "========================================"
     echo "    Bitwarden一键安装脚本"
-    echo "          IPv6兼容版本"
+    echo "      Worker备份版 (IPv6兼容)"
     echo "========================================"
     echo ""
     
@@ -941,8 +1439,11 @@ main_install() {
     # 创建配置文件
     create_configs
     
-    # 创建备份脚本
-    create_backup_script
+    # 创建Worker备份脚本
+    create_worker_backup_script
+    
+    # 创建Worker部署指南
+    create_worker_guide
     
     # 创建恢复脚本
     create_restore_script
@@ -980,7 +1481,8 @@ restore_mode() {
     install_docker
     
     # 创建脚本
-    create_backup_script
+    create_worker_backup_script
+    create_worker_guide
     create_restore_script
     create_management_script
     setup_cron
@@ -998,7 +1500,7 @@ main_menu() {
         clear
         echo "========================================"
         echo "    Bitwarden部署工具"
-        echo "          IPv6兼容版本"
+        echo "      Worker备份版 (IPv6兼容)"
         echo "========================================"
         echo ""
         echo "请选择模式:"
