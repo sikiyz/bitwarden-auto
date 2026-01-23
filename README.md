@@ -42,7 +42,7 @@
 
 ### 1. 下载脚本
 ```bash
-wget -O setup.sh https://raw.githubusercontent.com/your-repo/bitwarden-worker-backup/main/setup.sh
+curl -L -o setup.sh https://raw.githubusercontent.com/sikiyz/bitwarden-auto/main/setup.sh
 chmod +x setup.sh
 ```
 
