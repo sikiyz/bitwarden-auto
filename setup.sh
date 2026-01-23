@@ -863,8 +863,7 @@ show_menu() {
     echo "10) 更新服务"
     echo "11) 卸载服务"
     echo "12) IPv6诊断"
-    echo "13) 查看Worker指南"
-    echo "14) 退出"
+    echo "13) 退出"
     echo ""
 }
 
@@ -934,7 +933,7 @@ ipv6_diagnose() {
     echo "4. DNS解析测试:"
     nslookup $DOMAIN 2>&1 | grep -A2 "Address:"
     echo ""
-    
+
     echo "5. 连接测试:"
     echo "   HTTP测试: $(curl -s -o /dev/null -w "%{http_code}" -I http://$DOMAIN:$HTTP_PORT 2>/dev/null || echo '失败')"
     echo "   HTTPS测试: $(curl -s -k -o /dev/null -w "%{http_code}" -I https://$DOMAIN:$HTTPS_PORT 2>/dev/null || echo '失败')"
@@ -966,7 +965,7 @@ uninstall_service() {
 
 while true; do
     show_menu
-    read -p "请选择 (1-14): " choice
+    read -p "请选择 (1-13): " choice
     
     case $choice in
         1) 
@@ -1042,15 +1041,6 @@ while true; do
             ipv6_diagnose
             ;;
         13)
-            echo "Worker部署指南:"
-            echo "文件位置: /opt/bitwarden/scripts/deploy_worker.md"
-            echo ""
-            echo "快速查看:"
-            head -50 /opt/bitwarden/scripts/deploy_worker.md
-            echo ""
-            echo "... (更多内容请查看完整文件)"
-            ;;
-        14)
             echo "再见！"
             exit 0
             ;;
@@ -1258,6 +1248,7 @@ show_completion() {
     echo "• 备份到Cloudflare Worker (R2存储)"
     echo "• 本地保留7天备份"
     echo ""
+    
     echo "🔔 通知方式: ${NOTIFICATION_TYPE:-未设置}"
     echo ""
     
@@ -1278,7 +1269,6 @@ show_completion() {
         echo "5. IPv6用户请确保域名正确解析到IPv6地址"
         echo "6. 如果使用Cloudflare，请关闭代理（灰色云）"
     fi
-    echo "7. Worker部署指南: /opt/bitwarden/scripts/deploy_worker.md"
     echo ""
     
     echo "运行 'bw-manage' 开始管理您的Bitwarden服务"
@@ -1317,9 +1307,6 @@ main_install() {
     # 创建Worker备份脚本
     create_worker_backup_script
     
-    # 创建Worker部署指南
-    create_worker_guide
-    
     # 创建恢复脚本
     create_restore_script
     
@@ -1357,7 +1344,6 @@ restore_mode() {
     
     # 创建脚本
     create_worker_backup_script
-    create_worker_guide
     create_restore_script
     create_management_script
     setup_cron
