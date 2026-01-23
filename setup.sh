@@ -240,11 +240,14 @@ DOCKER_EOF
     
     if [ "$IP_VERSION" = "ipv6" ]; then
         log "检测到IPv6选择，应用IPv6优化配置..."
-        # IPv6优化配置（修复了ipv6://协议问题）
+        # IPv6优化配置（修复了TLS问题）
         cat > /opt/bitwarden/config/Caddyfile << IPV6_CADDY_EOF
 {
     email $EMAIL
     admin off
+    servers {
+        protocols h1 h2 h3
+    }
 }
 
 # HTTP自动重定向到HTTPS（IPv6兼容）
@@ -257,6 +260,12 @@ $DOMAIN:$HTTP_PORT {
 $DOMAIN:$HTTPS_PORT {
     bind [::]:$HTTPS_PORT
     encode gzip
+    
+    # 修复TLS配置
+    tls {
+        protocols tls1.2 tls1.3
+        ciphers TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384 TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+    }
     
     # IPv6优化配置 - 直接使用容器名，Caddy会自动处理
     reverse_proxy vaultwarden:80 {
@@ -1224,7 +1233,7 @@ show_completion() {
     
     if [ "$IP_VERSION" = "ipv6" ]; then
         echo "🔧 IPv6配置已启用:"
-        echo "• 已应用IPv6优化配置"
+        echo "• 已应用IPv6优化配置（修复TLS问题）"
         echo "• 支持IPv6直接访问"
         echo "• 如需诊断IPv6连接，请在管理面板选择'IPv6诊断'"
         echo ""
@@ -1445,12 +1454,18 @@ ipv6_quick_fix() {
     echo "停止服务..."
     docker-compose down 2>/dev/null || true
     
-    # 创建IPv6优化的Caddyfile
+    # 创建IPv6优化的
+
+```bash
+    # 创建IPv6优化的Caddyfile（修复TLS问题）
     echo "创建IPv6优化配置..."
     cat > config/Caddyfile << IPV6_FIX_EOF
 {
     email ${EMAIL:-admin@example.com}
     admin off
+    servers {
+        protocols h1 h2 h3
+    }
 }
 
 # HTTP自动重定向到HTTPS（IPv6兼容）
@@ -1463,6 +1478,12 @@ ${DOMAIN:-bitwarden.example.com}:${HTTP_PORT:-80} {
 ${DOMAIN:-bitwarden.example.com}:${HTTPS_PORT:-443} {
     bind [::]:${HTTPS_PORT:-443}
     encode gzip
+    
+    # 修复TLS配置
+    tls {
+        protocols tls1.2 tls1.3
+        ciphers TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384 TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+    }
     
     # IPv6优化配置
     reverse_proxy vaultwarden:80 {
